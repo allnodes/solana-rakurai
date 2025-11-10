@@ -169,7 +169,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             .num_messages_processed
             .fetch_add(1, Ordering::Relaxed);
 
-        let output = self.consumer.process_and_record_aged_transactions(
+        let (output, cu_err_indexes) = self.consumer.process_and_record_aged_transactions(
             bank,
             &work.transactions,
             &work.max_ages,
@@ -193,6 +193,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
             extra_info,
+            cu_err_indexes,
         })?;
         Ok(ProcessingStatus::Processed)
     }
@@ -388,6 +389,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             work,
             retryable_indexes,
             extra_info,
+            cu_err_indexes: None,
         })?;
         Ok(ProcessingStatus::Processed)
     }
@@ -642,10 +644,11 @@ pub(crate) mod external {
                     false,
                 );
 
-                self.metrics.update_for_consume(&output);
+                self.metrics.update_for_consume(&output.0);
                 self.metrics.has_data.store(true, Ordering::Relaxed);
 
                 let Ok(commit_results) = output
+                    .0
                     .execute_and_commit_transactions_output
                     .commit_transactions_result
                 else {
@@ -1835,6 +1838,7 @@ fn backoff(idle_duration: Duration, sleep_duration: &Duration) -> Duration {
 /// These are atomic, and intended to be reported by the scheduling thread
 /// since the consume worker thread is sleeping unless there is work to be
 /// done.
+#[repr(C)]
 pub struct ConsumeWorkerMetrics {
     id: String,
     interval: AtomicInterval,
@@ -1847,14 +1851,17 @@ pub struct ConsumeWorkerMetrics {
 
 impl ConsumeWorkerMetrics {
     /// Report and reset metrics iff the interval has elapsed and the worker did some work.
-    pub fn maybe_report_and_reset(&self) {
+    pub fn maybe_report_and_reset(&self, bam_controller: bool) {
         const REPORT_INTERVAL_MS: u64 = 20;
         if self.interval.should_update(REPORT_INTERVAL_MS)
             && self.has_data.swap(false, Ordering::Relaxed)
         {
-            self.count_metrics.report_and_reset(&self.id);
-            self.timing_metrics.report_and_reset(&self.id);
-            self.error_metrics.report_and_reset(&self.id);
+            self.count_metrics
+                .report_and_reset(&self.id, bam_controller);
+            self.timing_metrics
+                .report_and_reset(&self.id, bam_controller);
+            self.error_metrics
+                .report_and_reset(&self.id, bam_controller);
         }
     }
 
@@ -2084,6 +2091,7 @@ impl ConsumeWorkerMetrics {
     }
 }
 
+#[repr(C)]
 struct ConsumeWorkerCountMetrics {
     max_queue_len: AtomicU64,
     num_messages_processed: AtomicU64,
@@ -2115,9 +2123,14 @@ impl Default for ConsumeWorkerCountMetrics {
 }
 
 impl ConsumeWorkerCountMetrics {
-    fn report_and_reset(&self, id: &str) {
+    fn report_and_reset(&self, id: &str, bam_controller: bool) {
+        let name = if bam_controller {
+            "bam_banking_stage_worker_counts"
+        } else {
+            "banking_stage_worker_counts"
+        };
         datapoint_info!(
-            "banking_stage_worker_counts",
+            name,
             "id" => id,
             ("max_queue_len", self.max_queue_len.swap(0, Ordering::Relaxed), i64),
             (
@@ -2174,6 +2187,7 @@ impl ConsumeWorkerCountMetrics {
 }
 
 #[derive(Default)]
+#[repr(C)]
 struct ConsumeWorkerTimingMetrics {
     cost_model_us: AtomicU64,
     load_execute_us: AtomicU64,
@@ -2187,9 +2201,14 @@ struct ConsumeWorkerTimingMetrics {
 }
 
 impl ConsumeWorkerTimingMetrics {
-    fn report_and_reset(&self, id: &str) {
+    fn report_and_reset(&self, id: &str, bam_controller: bool) {
+        let name = if bam_controller {
+            "bam_banking_stage_worker_timing"
+        } else {
+            "banking_stage_worker_timing"
+        };
         datapoint_info!(
-            "banking_stage_worker_timing",
+            name,
             "id" => id,
             (
                 "cost_model_us",
@@ -2233,6 +2252,7 @@ impl ConsumeWorkerTimingMetrics {
 }
 
 #[derive(Default)]
+#[repr(C)]
 struct ConsumeWorkerTransactionErrorMetrics {
     total: AtomicUsize,
     account_in_use: AtomicUsize,
@@ -2261,9 +2281,14 @@ struct ConsumeWorkerTransactionErrorMetrics {
 }
 
 impl ConsumeWorkerTransactionErrorMetrics {
-    fn report_and_reset(&self, id: &str) {
+    fn report_and_reset(&self, id: &str, bam_controller: bool) {
+        let name = if bam_controller {
+            "bam_banking_stage_worker_error_metrics"
+        } else {
+            "banking_stage_worker_error_metrics"
+        };
         datapoint_info!(
-            "banking_stage_worker_error_metrics",
+            name,
             "id" => id,
             ("total", self.total.swap(0, Ordering::Relaxed), i64),
             (
@@ -2487,7 +2512,12 @@ mod tests {
         let recorder = TransactionRecorder::new(record_sender);
 
         let (replay_vote_sender, replay_vote_receiver) = unbounded();
-        let committer = Committer::new(None, replay_vote_sender, None);
+        let committer = Committer::new(
+            None,
+            replay_vote_sender,
+            Arc::new(PrioritizationFeeCache::new(0u64)),
+            None,
+        );
         let consumer = Consumer::new(committer, recorder, QosService::new(1), None);
         let shared_leader_state = SharedLeaderState::new(0, None, None);
 

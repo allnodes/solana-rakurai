@@ -278,7 +278,7 @@ fn test_scheduler_producing_blocks() {
     // Now, send transaction
     channels
         .sender_for_unified_scheduler()
-        .send(banking_packet_batch)
+        .send(banking_packet_batch, &None)
         .unwrap();
 
     // Wait until tpu_bank reaches its tick height...

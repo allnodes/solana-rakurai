@@ -40,7 +40,7 @@ impl BundlePacketDeserializer {
         enable_instruction_accounts_limit: bool,
         transaction_account_lock_limit: usize,
         blacklisted_accounts: &HashSet<Pubkey>,
-    ) -> Result<TransactionViewState, PacketHandlingError> {
+    ) -> Result<(TransactionViewState, u64), PacketHandlingError> {
         let (view, deactivation_slot) = translate_to_runtime_view(
             bytes,
             working_bank,
@@ -75,7 +75,8 @@ impl BundlePacketDeserializer {
         let max_age = calculate_max_age(root_bank.epoch(), deactivation_slot, root_bank.slot());
         let fee_budget_limits = FeeBudgetLimits::from(compute_budget_limits);
         let (priority, cost) = calculate_priority_and_cost(&view, &fee_budget_limits, working_bank);
+        let reward = working_bank.calculate_reward_for_transaction(&view, &fee_budget_limits);
 
-        Ok(TransactionState::new(view, max_age, priority, cost))
+        Ok((TransactionState::new(view, max_age, priority, cost), reward))
     }
 }

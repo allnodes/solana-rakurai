@@ -20,7 +20,7 @@ use {
     },
     solana_core::{
         banking_trace::DirByteLimit,
-        validator::{BlockProductionMethod, BlockVerificationMethod},
+        validator::{BlockProductionMethod, BlockVerificationMethod, ClientMode},
     },
     solana_keypair::Keypair,
     solana_ledger::{blockstore_options::BlockstoreOptions, use_snapshot_archives_at_startup},
@@ -1310,6 +1310,85 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("rewards_merkle_root_authority")
+            .long("rewards-merkle-root-authority")
+            .value_name("REWARDS_MERKLE_ROOT_AUTHORITY")
+            .takes_value(true)
+            .help("The public key of authorized rewards merkle-root uploader/distributor."),
+    )
+    .arg(
+        Arg::with_name("rakurai_activation_program_id")
+            .long("rakurai-activation-program-id")
+            .value_name("RAKURAI_ACTIVATION_PROGRAM_ID")
+            .takes_value(true)
+            .help("The public key of rakurai activation program"),
+    )
+    .arg(
+        Arg::with_name("reward_distribution_program_id")
+            .long("reward-distribution-program-id")
+            .value_name("REWARD_DISTRIBUTION_PROGRAM_ID")
+            .takes_value(true)
+            .help("The public key of rakurai reward distribution program"),
+    )
+    .arg(
+        Arg::with_name("banking_packet_delay_ms")
+            .long("banking-packet-delay-ms")
+            .value_name("BANKING_PACKET_DELAY_MS")
+            .takes_value(true)
+            .default_value("200")
+            .help("This argument is deprecated, please remove it from your startup scripts."),
+    )
+    .arg(
+        Arg::with_name("rs_cfg_d1")
+            .long("rak-config-d1")
+            .value_name("RAK-CONFIG-D1")
+            .takes_value(true)
+            .default_value("40")
+            .help("This is rakurai scheduler config arg 1"),
+    )
+    .arg(
+        Arg::with_name("target_slot_adjustment_ms")
+            .long("target-slot-adjustment-ms")
+            .value_name("TARGET_SLOT_ADJUSTMENT_MS")
+            .takes_value(true)
+            .default_value("10")
+            .help("This time is slot adjustment in ms to reduce from target 400ms slot time")
+            .validator(|v| {
+                v.parse::<u64>()
+                    .map_err(|_| String::from("Must be an integer")) // check if number
+                    .and_then(|n| {
+                        if n <= 50 {
+                            Ok(())
+                        } else {
+                            Err(String::from("Value must be between 0 and 50"))
+                        }
+                    })
+            }),
+    )
+    .arg(
+        Arg::with_name("tx_io_check")
+            .long("tx-io-check")
+            .help("Enable transaction input/output validation (optional string)")
+            .takes_value(true)
+            .min_values(0) // allows zero or one value
+            .max_values(1),
+    )
+    .arg(
+        Arg::with_name("oms_connector")
+            .long("oms-connector")
+            .help("Enable the OMS (Order Management System) connector")
+            .takes_value(false),
+    )
+    .arg(
+        Arg::with_name("client_mode")
+            .long("client-mode")
+            .value_name("CLIENT_MODE")
+            .takes_value(true)
+            .possible_values(ClientMode::cli_names())
+            .default_value(ClientMode::default().into())
+            .help(ClientMode::cli_message()),
+    )
+    .arg(
         Arg::with_name("shred_receiver_address")
             .long("shred-receiver-address")
             .value_name("SHRED_RECEIVER_ADDRESS")
@@ -1375,6 +1454,17 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .takes_value(false)
             .requires("retransmit_xdp_cpu_cores")
             .help("EXPERIMENTAL: Enable XDP zero copy. Requires hardware support"),
+    )
+    .arg(
+        Arg::with_name("secondary_block_engines_urls")
+            .long("secondary-block-engines-urls")
+            .value_name("HOST:PORT")
+            .help(
+                "Specify extra block engines urls to receive bundles from. \
+                Comma separated urls, May be specified multiple times.",
+            )
+            .takes_value(true)
+            .multiple(true),
     )
     .args(&pub_sub_config::args(/*test_validator:*/ false))
     .args(&json_rpc_config::args())

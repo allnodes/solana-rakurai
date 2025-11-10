@@ -37,7 +37,10 @@ use {
     },
     solana_clock::{DEFAULT_SLOTS_PER_EPOCH, Slot},
     solana_core::{
-        banking_stage::transaction_scheduler::scheduler_controller::SchedulerConfig,
+        banking_stage::{
+            RakuraiConfig, RakuraiMode, reward_distributor::RewardDistributionConfig,
+            transaction_scheduler::scheduler_controller::SchedulerConfig,
+        },
         banking_trace::DISABLED_BAKING_TRACE_DIR,
         consensus::tower_storage,
         proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
@@ -48,7 +51,7 @@ use {
         tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
         tpu::MAX_VOTES_PER_SECOND,
         validator::{
-            BlockProductionMethod, BlockVerificationMethod, SchedulerPacing, Validator,
+            BlockProductionMethod, BlockVerificationMethod, ClientMode, SchedulerPacing, Validator,
             ValidatorConfig, ValidatorLogConfig, ValidatorStartProgress, ValidatorTpuConfig,
             is_snapshot_config_valid,
         },
@@ -86,7 +89,7 @@ use {
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::{self, FromStr},
-        sync::{Arc, RwLock, atomic::AtomicBool},
+        sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
         time::Duration,
     },
 };
@@ -807,9 +810,45 @@ pub fn execute(
         trust_packets: matches.is_present("trust_block_engine_packets"),
     }));
 
+    let secondary_block_engine_urls = Arc::new(ArcSwap::from_pointee(
+        matches
+            .values_of("secondary_block_engines_urls")
+            .unwrap_or_default()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    ));
+
     let bam_url = Arc::new(ArcSwap::from_pointee(
         crate::commands::bam::extract_bam_url(matches)?,
     ));
+    let reward_distribution_config = RewardDistributionConfig {
+        rewards_merkle_root_authority:pubkey_of(&matches, "rewards_merkle_root_authority")
+        .unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rewards-merkle-root-authority argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        vote_account: pubkey_of(&matches, "vote_account").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--vote-account argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        rakurai_activation_program_id: pubkey_of(&matches, "rakurai_activation_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rakurai-activation-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        reward_distribution_program_id: pubkey_of(&matches, "reward_distribution_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--reward-distribution-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        tip_distribution_program_id:tip_manager_config.tip_distribution_program_id,
+    };
 
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms =
@@ -856,6 +895,75 @@ pub fn execute(
             )
         })?,
     ));
+
+    // Defaults are set in cli definition, safe to use unwrap() here
+    let rs_cfg_d1: u64 = if let Some(rs_cfg_d1) = value_of(&matches, "rs_cfg_d1") {
+        rs_cfg_d1
+    } else {
+        // default to 0 if not specified
+        40
+    };
+    let rakurai_config = Arc::new(RwLock::new(RakuraiConfig {
+        rs_mode: RakuraiMode::Mode2,
+        rs_cfg_d1: rs_cfg_d1,
+        rs_cfg_ct1: 54,
+        rs_cfg_nd1: 30,
+        rs_cfg_ff1: 1.0,
+        rs_cfg_ft1: 120,
+        rs_cfg_tf1: 1.129,
+        rs_cfg_ntft: 500,
+    }));
+    if let Ok(rakurai_config_read) = rakurai_config.read() {
+        info!("Rakurai config:{:?}", rakurai_config_read);
+    }
+
+    let target_slot_adjustment_ms: u64 =
+        if let Some(target_slot_adjustment_ms) = value_of(&matches, "target_slot_adjustment_ms") {
+            target_slot_adjustment_ms
+        } else {
+            // default to 10 if not specified
+            10
+        };
+
+    let mut client_mode = if matches.is_present("client_mode") {
+        value_t_or_exit!(matches, "client_mode", ClientMode)
+    } else {
+        ClientMode::default()
+    };
+
+    info!("client_mode set to {client_mode}");
+
+    if client_mode == ClientMode::RakuraiBAM {
+        client_mode = ClientMode::RakuraiJito;
+        info!("Overriding client_mode to {client_mode} as RakuraiBAM is not allowed");
+    }
+    if client_mode != ClientMode::RakuraiJito && bam_url.load().is_none() {
+        client_mode = ClientMode::RakuraiJito;
+        info!(
+            "Overriding client_mode as BAM URL was not specified. Client mode set to {client_mode}"
+        );
+    }
+
+    let client_mode = Arc::new(Mutex::new(client_mode));
+
+    info!("target_slot_adjustment_ms set to {target_slot_adjustment_ms} ms");
+
+    let tx_io_check: Option<String> = if matches.is_present("tx_io_check") {
+        // if user provided a value, use it; otherwise use default
+        Some(
+            matches
+                .value_of("tx_io_check")
+                .unwrap_or("/var/tmp/tx_io.log")
+                .to_string(),
+        )
+    } else {
+        // flag not used at all
+        None
+    };
+    info!("tx_io_check set to {:?}", tx_io_check);
+
+    let oms_connector = matches.is_present("oms_connector");
+    info!("oms_connector set to {oms_connector}");
 
     let mut validator_config = ValidatorConfig {
         log_config,
@@ -985,6 +1093,14 @@ pub fn execute(
         tip_manager_config,
         bam_url,
         disable_multicast_shred_check: matches.is_present("disable_multicast_shred_check"),
+        reward_distribution_config,
+        rakurai_config,
+        target_slot_adjustment_ms,
+        tx_io_check,
+        oms_connector,
+        client_mode,
+        secondary_block_engine_urls,
+        reset_rakurai: Arc::new(AtomicBool::new(false)),
     };
     validator_config
         .block_production_method
@@ -1048,6 +1164,9 @@ pub fn execute(
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
             bam_url: validator_config.bam_url.clone(),
+            client_mode: validator_config.client_mode.clone(),
+            rakurai_config: validator_config.rakurai_config.clone(),
+            reset_rakurai: validator_config.reset_rakurai.clone(),
         },
     );
 

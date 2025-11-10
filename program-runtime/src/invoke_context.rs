@@ -108,6 +108,7 @@ impl fmt::Display for AllocErr {
     }
 }
 
+#[repr(C)]
 pub struct BpfAllocator {
     len: u64,
     pos: u64,
@@ -136,6 +137,7 @@ impl BpfAllocator {
     }
 }
 
+#[repr(C)]
 pub struct EnvironmentConfig<'a> {
     pub blockhash: Hash,
     pub blockhash_lamports_per_signature: u64,
@@ -167,12 +169,14 @@ impl<'a> EnvironmentConfig<'a> {
     }
 }
 
+#[repr(C)]
 pub struct SyscallContext {
     pub allocator: BpfAllocator,
     pub accounts_metadata: Vec<SerializedAccountMetadata>,
 }
 
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct SerializedAccountMetadata {
     /// Address of the first byte of the serialized account record (the
     /// `NON_DUP_MARKER`/duplicate-marker byte).
@@ -185,6 +189,7 @@ pub struct SerializedAccountMetadata {
 }
 
 /// Main pipeline from runtime to program execution.
+#[repr(C)]
 pub struct InvokeContext<'a, 'ix_data> {
     /// Information about the currently executing transaction.
     pub transaction_context: &'a mut TransactionContext<'ix_data>,
