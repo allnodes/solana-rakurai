@@ -810,6 +810,7 @@ impl ReplayStage {
                     first_alpenglow_slot,
                     (!is_alpenglow_migration_complete).then_some(&mut tbft_structs),
                     &mut is_alpenglow_migration_complete,
+                    &leader_schedule_cache,
                 );
                 replay_active_banks_time.stop();
 
@@ -2304,6 +2305,8 @@ impl ReplayStage {
         verify_recyclers: &VerifyRecyclers,
         log_messages_bytes_limit: Option<usize>,
         prioritization_fee_cache: &PrioritizationFeeCache,
+        tick_notifier: Option<Arc<dyn Fn(solana_clock::Slot, u64, &solana_entry::poh::PohEntry, Option<&solana_pubkey::Pubkey>, u32) + Send + Sync>>,
+        leader_schedule_cache: &LeaderScheduleCache,
     ) -> result::Result<usize, BlockstoreProcessorError> {
         let mut w_replay_stats = replay_stats.write().unwrap();
         let mut w_replay_progress = replay_progress.write().unwrap();
@@ -2325,6 +2328,8 @@ impl ReplayStage {
             false,
             log_messages_bytes_limit,
             prioritization_fee_cache,
+            tick_notifier,
+            Some(leader_schedule_cache),
         )?;
         let tx_count_after = w_replay_progress.num_txs;
         let tx_count = tx_count_after - tx_count_before;
@@ -2957,6 +2962,8 @@ impl ReplayStage {
         log_messages_bytes_limit: Option<usize>,
         active_bank_slots: &[Slot],
         prioritization_fee_cache: &PrioritizationFeeCache,
+        poh_recorder: &RwLock<PohRecorder>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> Vec<ReplaySlotFromBlockstore> {
         // Make mutable shared structures thread safe.
         let progress = RwLock::new(progress);
@@ -3027,6 +3034,13 @@ impl ReplayStage {
                     if bank.collector_id() != my_pubkey {
                         let mut replay_blockstore_time =
                             Measure::start("replay_blockstore_into_bank");
+                        // Performance optimization: Clone the tick_notifier Arc without holding the lock.
+                        // This allows us to release the lock immediately after cloning, minimizing
+                        // lock contention with the PoH service thread.
+                        let tick_notifier = {
+                            let poh_recorder_guard = poh_recorder.read().unwrap();
+                            poh_recorder_guard.tick_notifier()
+                        };
                         let blockstore_result = Self::replay_blockstore_into_bank(
                             &bank,
                             blockstore,
@@ -3039,6 +3053,8 @@ impl ReplayStage {
                             &verify_recyclers.clone(),
                             log_messages_bytes_limit,
                             prioritization_fee_cache,
+                            tick_notifier,
+                            leader_schedule_cache,
                         );
                         replay_blockstore_time.stop();
                         replay_result.replay_result = Some(blockstore_result);
@@ -3072,6 +3088,8 @@ impl ReplayStage {
         log_messages_bytes_limit: Option<usize>,
         bank_slot: Slot,
         prioritization_fee_cache: &PrioritizationFeeCache,
+        poh_recorder: &RwLock<PohRecorder>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> ReplaySlotFromBlockstore {
         let mut replay_result = ReplaySlotFromBlockstore {
             is_slot_dead: false,
@@ -3116,6 +3134,12 @@ impl ReplayStage {
 
             if bank.collector_id() != my_pubkey {
                 let mut replay_blockstore_time = Measure::start("replay_blockstore_into_bank");
+                // Performance optimization: Clone the tick_notifier Arc without holding the lock.
+                // See comment in replay_active_banks_concurrently for details.
+                let tick_notifier = {
+                    let poh_recorder_guard = poh_recorder.read().unwrap();
+                    poh_recorder_guard.tick_notifier()
+                };
                 let blockstore_result = Self::replay_blockstore_into_bank(
                     &bank,
                     blockstore,
@@ -3128,6 +3152,8 @@ impl ReplayStage {
                     &verify_recyclers.clone(),
                     log_messages_bytes_limit,
                     prioritization_fee_cache,
+                    tick_notifier,
+                    leader_schedule_cache,
                 );
                 replay_blockstore_time.stop();
                 replay_result.replay_result = Some(blockstore_result);
@@ -3501,6 +3527,7 @@ impl ReplayStage {
         first_alpenglow_slot: Option<Slot>,
         tbft_structs: Option<&mut TowerBFTStructures>,
         is_alpenglow_migration_complete: &mut bool,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> bool /* completed a bank */ {
         let active_bank_slots = bank_forks.read().unwrap().active_bank_slots();
         let num_active_banks = active_bank_slots.len();
@@ -3528,6 +3555,8 @@ impl ReplayStage {
                     log_messages_bytes_limit,
                     &active_bank_slots,
                     prioritization_fee_cache,
+                    poh_recorder,
+                    leader_schedule_cache,
                 )
             }
             ForkReplayMode::Serial | ForkReplayMode::Parallel(_) => active_bank_slots
@@ -3548,6 +3577,8 @@ impl ReplayStage {
                         log_messages_bytes_limit,
                         *bank_slot,
                         prioritization_fee_cache,
+                        poh_recorder,
+                        leader_schedule_cache,
                     )
                 })
                 .collect(),
@@ -5186,6 +5217,7 @@ pub(crate) mod tests {
                 .thread_name(|i| format!("solReplayTest{i:02}"))
                 .build()
                 .expect("new rayon threadpool");
+            let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&bank0));
             let res = ReplayStage::replay_blockstore_into_bank(
                 &bank1,
                 &blockstore,
@@ -5198,6 +5230,8 @@ pub(crate) mod tests {
                 &VerifyRecyclers::default(),
                 None,
                 &PrioritizationFeeCache::new(0u64),
+                None, // tick_notifier
+                &leader_schedule_cache,
             );
             let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
             let rpc_subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
