@@ -2,6 +2,8 @@
 //! By default, signatures are verified in parallel using all available CPU
 //! cores.
 
+use std::sync::{Arc, atomic::AtomicBool};
+
 pub use solana_perf::sigverify::{
     TxOffset, count_packets_in_batches, ed25519_verify, ed25519_verify_disabled,
 };
@@ -13,7 +15,6 @@ use {
     agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::{Sender, TrySendError},
     solana_perf::{packet::PacketBatch, sigverify},
-    std::sync::Arc,
 };
 
 pub struct TransactionSigVerifier {
@@ -21,6 +22,7 @@ pub struct TransactionSigVerifier {
     banking_stage_sender: BankingPacketSender,
     forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
     reject_non_vote: bool,
+    input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
 }
 
 impl TransactionSigVerifier {
@@ -29,7 +31,7 @@ impl TransactionSigVerifier {
         packet_sender: BankingPacketSender,
         forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
     ) -> Self {
-        let mut new_self = Self::new(thread_pool, packet_sender, forward_stage_sender);
+        let mut new_self = Self::new(thread_pool, packet_sender, forward_stage_sender, None);
         new_self.reject_non_vote = true;
         new_self
     }
@@ -38,12 +40,14 @@ impl TransactionSigVerifier {
         thread_pool: Arc<rayon::ThreadPool>,
         banking_stage_sender: BankingPacketSender,
         forward_stage_sender: Option<Sender<(BankingPacketBatch, bool)>>,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> Self {
         Self {
             thread_pool,
             banking_stage_sender,
             forward_stage_sender,
             reject_non_vote: false,
+            input_tx_signature_sender,
         }
     }
 }
@@ -57,15 +61,18 @@ impl SigVerifier for TransactionSigVerifier {
     ) -> Result<(), SigVerifyServiceError<Self::SendType>> {
         let banking_packet_batch = BankingPacketBatch::new(packet_batches);
         if let Some(forward_stage_sender) = &self.forward_stage_sender {
-            self.banking_stage_sender
-                .send(banking_packet_batch.clone())?;
+            self.banking_stage_sender.send(
+                banking_packet_batch.clone(),
+                &self.input_tx_signature_sender,
+            )?;
             if let Err(TrySendError::Full(_)) =
                 forward_stage_sender.try_send((banking_packet_batch, self.reject_non_vote))
             {
                 warn!("forwarding stage channel is full, dropping packets.");
             }
         } else {
-            self.banking_stage_sender.send(banking_packet_batch)?;
+            self.banking_stage_sender
+                .send(banking_packet_batch, &self.input_tx_signature_sender)?;
         }
 
         Ok(())

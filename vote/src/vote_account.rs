@@ -22,6 +22,7 @@ use {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq)]
+#[repr(C)]
 pub struct VoteAccount(Arc<VoteAccountInner>);
 
 #[derive(Debug, Error)]
@@ -34,6 +35,7 @@ pub enum Error {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug)]
+#[repr(C)]
 struct VoteAccountInner {
     account: AccountSharedData,
     vote_state_view: VoteStateView,
@@ -42,6 +44,7 @@ struct VoteAccountInner {
 pub type VoteAccountsHashMap = HashMap<Pubkey, (/*stake:*/ u64, VoteAccount)>;
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Serialize, Deserialize)]
+#[repr(C)]
 pub struct VoteAccounts {
     #[serde(deserialize_with = "deserialize_accounts_hash_map")]
     vote_accounts: Arc<VoteAccountsHashMap>,

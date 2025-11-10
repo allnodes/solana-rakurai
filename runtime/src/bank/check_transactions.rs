@@ -164,7 +164,7 @@ impl Bank {
         CheckedTransactionDetails::new(nonce_address, compute_budget_and_limits)
     }
 
-    fn check_transaction_age(
+    pub fn check_transaction_age(
         &self,
         tx: &impl SVMMessage,
         max_age: usize,
@@ -189,6 +189,13 @@ impl Bank {
                 compute_budget,
             ))
         } else {
+            let require_static_nonce_account = self
+                .feature_set
+                .is_active(&agave_feature_set::require_static_nonce_account::id());
+            if let Some(_) = tx.get_durable_nonce(require_static_nonce_account) {
+                error_counters.nonce_account_not_found += 1;
+            }
+
             error_counters.blockhash_not_found += 1;
             Err(TransactionError::BlockhashNotFound)
         }

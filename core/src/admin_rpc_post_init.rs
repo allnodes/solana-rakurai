@@ -95,6 +95,7 @@ pub struct AdminRpcRequestMetadataPostInit {
     pub snapshot_controller: Arc<SnapshotController>,
     pub blockstore: Arc<Blockstore>,
     pub block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+    pub secondary_block_engine_urls: Arc<ArcSwap<Vec<String>>>,
     pub relayer_config: Arc<ArcSwap<RelayerConfig>>,
     pub shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
     pub shred_retransmit_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,

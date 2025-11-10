@@ -22,10 +22,12 @@ use {
     },
     ahash::HashSet,
     arc_swap::ArcSwap,
-    crossbeam_channel::{Receiver, RecvTimeoutError},
+    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     smallvec::SmallVec,
+    solana_address::Address,
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::blockstore_processor::TransactionStatusSender,
     solana_measure::measure_us,
@@ -35,11 +37,11 @@ use {
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::ReplayVoteSender,
     },
+    solana_signature::Signature,
     solana_transaction::TransactionError,
     std::{
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         num::{NonZeroUsize, Saturating},
-        ops::Deref,
         sync::{
             Arc, RwLock,
             atomic::{AtomicBool, Ordering},
@@ -49,11 +51,20 @@ use {
     },
 };
 
+unsafe extern "C" {
+    fn check_bundle_feasability(priority: u64) -> bool;
+}
+
+#[inline]
+fn allow_bundle(priority: u64) -> bool {
+    unsafe { check_bundle_feasability(priority) }
+}
+
 pub mod bundle_account_locker;
 mod bundle_consumer;
 mod bundle_packet_deserializer;
-mod bundle_storage;
-const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(40);
+pub mod bundle_storage;
+const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(5);
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
 
 // Stats emitted periodically
@@ -88,6 +99,8 @@ pub struct BundleStageLoopMetrics {
     num_bundles_dropped_packet_filter_error: Saturating<u64>,
     num_bundles_dropped_bundle_too_large: Saturating<u64>,
     num_bundles_dropped_duplicate_transaction: Saturating<u64>,
+    num_bundles_dropped_duplicate_nonce: Saturating<u64>,
+    num_bundles_dropped_zero_tip_amount: Saturating<u64>,
 
     tip_programs_error: Saturating<u64>,
     bundle_lock_errors: Saturating<u64>,
@@ -114,6 +127,8 @@ impl Default for BundleStageLoopMetrics {
             num_bundles_dropped_packet_filter_error: Saturating(0),
             num_bundles_dropped_bundle_too_large: Saturating(0),
             num_bundles_dropped_duplicate_transaction: Saturating(0),
+            num_bundles_dropped_duplicate_nonce: Saturating(0),
+            num_bundles_dropped_zero_tip_amount: Saturating(0),
             tip_programs_error: Saturating(0),
             bundle_lock_errors: Saturating(0),
             bundles_processed: Saturating(0),
@@ -178,6 +193,15 @@ impl BundleStageLoopMetrics {
             }
             BundleStorageError::DuplicateTransaction => {
                 self.num_bundles_dropped_duplicate_transaction += 1;
+            }
+            BundleStorageError::DuplicateNonce => {
+                self.num_bundles_dropped_duplicate_nonce += 1;
+            }
+            BundleStorageError::ZeroTipAmount(block_engine_url) => {
+                self.num_bundles_dropped_zero_tip_amount += 1;
+                warn!(
+                    "dropped bundle with zero tip amount from block engine: {block_engine_url}"
+                );
             }
         }
     }
@@ -265,6 +289,16 @@ impl BundleStageLoopMetrics {
                     self.num_bundles_dropped_duplicate_transaction.0 as i64,
                     i64
                 ),
+                (
+                    "num_bundles_dropped_duplicate_nonce",
+                    self.num_bundles_dropped_duplicate_nonce.0 as i64,
+                    i64
+                ),
+                (
+                    "num_bundles_dropped_zero_tip_amount",
+                    self.num_bundles_dropped_zero_tip_amount.0 as i64,
+                    i64
+                ),
                 ("tip_programs_error", self.tip_programs_error.0 as i64, i64),
                 ("bundle_lock_errors", self.bundle_lock_errors.0 as i64, i64),
                 ("bundles_processed", self.bundles_processed.0 as i64, i64),
@@ -291,6 +325,8 @@ impl BundleStageLoopMetrics {
         self.num_bundles_dropped_packet_filter_error = Saturating(0);
         self.num_bundles_dropped_bundle_too_large = Saturating(0);
         self.num_bundles_dropped_duplicate_transaction = Saturating(0);
+        self.num_bundles_dropped_duplicate_nonce = Saturating(0);
+        self.num_bundles_dropped_zero_tip_amount = Saturating(0);
         self.tip_programs_error = Saturating(0);
         self.bundle_lock_errors = Saturating(0);
         self.bundles_processed = Saturating(0);
@@ -310,6 +346,8 @@ impl BundleStageLoopMetrics {
             || self.num_bundles_dropped_packet_filter_error.0 > 0
             || self.num_bundles_dropped_bundle_too_large.0 > 0
             || self.num_bundles_dropped_duplicate_transaction.0 > 0
+            || self.num_bundles_dropped_duplicate_nonce.0 > 0
+            || self.num_bundles_dropped_zero_tip_amount.0 > 0
             || self.tip_programs_error.0 > 0
             || self.bundle_lock_errors.0 > 0
             || self.bundles_processed.0 > 0
@@ -349,6 +387,8 @@ impl BundleStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: Sender<Signature>,
     ) -> Self {
         Self::start_bundle_thread(
             cluster_info,
@@ -365,6 +405,8 @@ impl BundleStage {
             block_builder_fee_info,
             prioritization_fee_cache,
             blacklisted_accounts,
+            nonce_packets,
+            nonce_packet_sender,
         )
     }
 
@@ -388,13 +430,17 @@ impl BundleStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         blacklisted_accounts: HashSet<Pubkey>,
+        nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: Sender<Signature>,
     ) -> Self {
         let committer = Committer::new(
             transaction_status_sender,
             replay_vote_sender,
-            prioritization_fee_cache,
+            prioritization_fee_cache.clone(),
+            None,
         );
-        let decision_maker = DecisionMaker::from(poh_recorder.read().unwrap().deref());
+
+        let decision_maker = DecisionMaker::from(&poh_recorder.clone());
 
         let consumer = BundleConsumer::new(
             committer,
@@ -419,6 +465,8 @@ impl BundleStage {
                     tip_manager,
                     block_builder_fee_info,
                     cluster_info,
+                    nonce_packets,
+                    nonce_packet_sender,
                 );
             })
             .unwrap();
@@ -438,6 +486,8 @@ impl BundleStage {
         tip_manager: TipManager,
         block_builder_fee_info: Arc<ArcSwap<BlockBuilderFeeInfo>>,
         cluster_info: Arc<ClusterInfo>,
+        nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: Sender<Signature>,
     ) {
         let mut last_metrics_update = Instant::now();
         let mut bundle_storage = BundleStorage::with_capacity(2_000);
@@ -477,6 +527,8 @@ impl BundleStage {
                 &mut bundle_storage,
                 &blacklisted_accounts,
                 &mut bundle_stage_metrics,
+                &nonce_packets,
+                &nonce_packet_sender,
             ) {
                 break;
             }
@@ -504,6 +556,8 @@ impl BundleStage {
         bundle_storage: &mut BundleStorage,
         blacklisted_accounts: &HashSet<Pubkey>,
         bundle_stage_metrics: &mut BundleStageLoopMetrics,
+        nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: &Sender<Signature>,
     ) -> Result<(), RecvTimeoutError> {
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
@@ -519,28 +573,63 @@ impl BundleStage {
         };
 
         let bundle = bundle_receiver.recv_timeout(recv_timeout)?;
-        for bundle in std::iter::once(bundle).chain(bundle_receiver.try_iter()) {
-            let num_packets = bundle.batch().len();
+        Self::insert_bundle(
+            bundle_storage,
+            bundle,
+            &root_bank,
+            &working_bank,
+            blacklisted_accounts,
+            bundle_stage_metrics,
+            nonce_packets,
+            nonce_packet_sender,
+        );
 
-            bundle_stage_metrics.increment_num_bundles_received(1);
-            bundle_stage_metrics.increment_num_packets_received(num_packets as u64);
-
-            match bundle_storage.insert_bundle(
+        while let Ok(bundle) = bundle_receiver.try_recv() {
+            Self::insert_bundle(
+                bundle_storage,
                 bundle,
                 &root_bank,
                 &working_bank,
                 blacklisted_accounts,
-            ) {
-                Ok(_) => {
-                    bundle_stage_metrics.increment_newly_buffered_bundles_count(1);
-                }
-                Err(e) => {
-                    bundle_stage_metrics.increment_bundle_dropped_error(e);
-                }
-            }
+                bundle_stage_metrics,
+                nonce_packets,
+                nonce_packet_sender,
+            );
         }
 
         Ok(())
+    }
+
+    fn insert_bundle(
+        bundle_storage: &mut BundleStorage,
+        bundle: VerifiedPacketBundle,
+        root_bank: &Arc<Bank>,
+        working_bank: &Arc<Bank>,
+        blacklisted_accounts: &HashSet<Pubkey>,
+        bundle_stage_metrics: &mut BundleStageLoopMetrics,
+        nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: &Sender<Signature>,
+    ) {
+        let num_packets = bundle.batch().len();
+
+        bundle_stage_metrics.increment_num_bundles_received(1);
+        bundle_stage_metrics.increment_num_packets_received(num_packets as u64);
+
+        match bundle_storage.insert_bundle(
+            bundle,
+            root_bank,
+            working_bank,
+            blacklisted_accounts,
+            nonce_packets,
+            nonce_packet_sender,
+        ) {
+            Ok(_) => {
+                bundle_stage_metrics.increment_newly_buffered_bundles_count(1);
+            }
+            Err(e) => {
+                bundle_stage_metrics.increment_bundle_dropped_error(e);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -556,12 +645,14 @@ impl BundleStage {
         cluster_info: &Arc<ClusterInfo>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
     ) {
-        match decision_maker.make_consume_or_forward_decision() {
+        let (decision, _, _) = decision_maker.make_consume_or_forward_decision();
+
+        match decision {
             // BufferedPacketsDecision::Consume means this leader is scheduled to be running at the moment.
             // Execute, record, and commit as many bundles possible given time, compute, and other constraints.
-            BufferedPacketsDecision::Consume(bank) => {
+            BufferedPacketsDecision::Consume(bank_start) => {
                 Self::consume_bundles(
-                    &bank,
+                    &bank_start.working_bank,
                     bundle_storage,
                     bundle_account_locker,
                     consumer,
@@ -598,7 +689,8 @@ impl BundleStage {
         cluster_info: &Arc<ClusterInfo>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
     ) {
-        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+        // Changing this to 1 to avoid locking a larger batch of bundles
+        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(1).unwrap();
 
         let mut bundles = VecDeque::with_capacity(BUNDLE_WINDOW_SIZE.get());
 
@@ -640,6 +732,14 @@ impl BundleStage {
         loop {
             // Always ensure the window is filled with bundles, breaking out when the bundle deque is full or no more bundles are available to pop
             while bundles.len() < BUNDLE_WINDOW_SIZE.get() {
+                let Some(bundle_priority) = bundle_storage.peek_bundle_priority(bank.slot()) else {
+                    break;
+                };
+
+                if !allow_bundle(bundle_priority) {
+                    break;
+                }
+
                 let Some(bundle) = bundle_storage.pop_bundle(bank.slot()) else {
                     break;
                 };
@@ -679,7 +779,7 @@ impl BundleStage {
                     continue;
                 }
             }
-            consume_worker_metrics.maybe_report_and_reset();
+            consume_worker_metrics.maybe_report_and_reset(false);
         }
 
         debug_assert!(

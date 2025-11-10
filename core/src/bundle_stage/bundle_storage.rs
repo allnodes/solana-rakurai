@@ -14,11 +14,20 @@ use {
     },
     ahash::HashSet,
     arrayvec::ArrayVec,
+    crossbeam_channel::Sender,
+    min_max_heap::MinMaxHeap,
+    solana_address::Address,
     solana_clock::Slot,
+    solana_hash::Hash,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
-    solana_runtime_transaction::transaction_meta::StaticMeta,
-    std::collections::VecDeque,
+    solana_runtime_transaction::{
+        transaction_meta::StaticMeta, transaction_with_meta::TransactionWithMeta,
+    },
+    solana_signature::Signature,
+    std::collections::{HashMap, VecDeque},
+    std::str::FromStr,
+    std::sync::{Arc, RwLock},
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,14 +38,62 @@ pub enum BundleStorageError {
     PacketFilterError((PacketHandlingError, usize /* packet index */)),
     BundleTooLarge,
     DuplicateTransaction,
+    DuplicateNonce,
+    ZeroTipAmount(String),
 }
 
 struct BundleTransactionId {
-    container_ids: Vec<usize>,
+    container_ids: Vec<(usize, u64, u64)>,
+    bundle_priority: u64,
+}
+
+impl Ord for BundleTransactionId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bundle_priority.cmp(&other.bundle_priority)
+    }
+}
+
+impl PartialOrd for BundleTransactionId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for BundleTransactionId {
+    fn eq(&self, other: &Self) -> bool {
+        self.bundle_priority == other.bundle_priority
+    }
+}
+
+impl Eq for BundleTransactionId {}
+
+const JITO_TIP_ACCOUNTS: [&str; 8] = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
+
+#[allow(dead_code)]
+pub fn jito_tip_accounts_map() -> HashMap<Pubkey, f64> {
+    JITO_TIP_ACCOUNTS
+        .iter()
+        .filter_map(|account| Pubkey::from_str(account).ok().map(|pubkey| (pubkey, 1.0)))
+        .collect()
+}
+
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    fn fetch_bundle_tip(transaction: &RuntimeTransactionView) -> u64;
 }
 
 pub struct BundleStorageEntry {
-    pub container_ids: Vec<usize>,
+    pub container_ids: Vec<(usize, u64 /*priority*/, u64 /*cost */)>,
+    pub bundle_priority: u64,
     pub transactions: Vec<RuntimeTransactionView>,
     pub max_ages: Vec<MaxAge>,
 }
@@ -47,13 +104,33 @@ pub struct BundleStorage {
     last_slot: Slot,
     transaction_capacity: usize,
     transaction_view_state_container: TransactionViewStateContainer,
-    unprocessed_bundles: VecDeque<BundleTransactionId>,
+    unprocessed_bundles: MinMaxHeap<BundleTransactionId>,
     // Storage for bundles that exceeded the cost model for the slot they were last attempted
     // execution on
     cost_model_buffered_bundles: VecDeque<BundleTransactionId>,
 }
 
 impl BundleStorage {
+    fn refresh_slot_boundary(&mut self, slot: Slot) {
+        if slot != self.last_slot {
+            // the cost_model_buffered_bundles has the oldest bundles at the front of the queue
+            // we need to pop from the back of that queue and insert to the front of the unprocessed_bundles queue so by the time we reach the front,
+            // the oldest bundle is at the front of the unprocessed_bundles queue
+            while let Some(bundle) = self.cost_model_buffered_bundles.pop_back() {
+                self.unprocessed_bundles.push(bundle);
+            }
+
+            self.last_slot = slot;
+        }
+    }
+
+    pub fn peek_bundle_priority(&mut self, slot: Slot) -> Option<u64> {
+        self.refresh_slot_boundary(slot);
+        self.unprocessed_bundles
+            .peek_max()
+            .map(|bundle| bundle.bundle_priority)
+    }
+
     const MAX_PACKETS_PER_BUNDLE: usize = 5;
 
     #[allow(unused)]
@@ -63,8 +140,9 @@ impl BundleStorage {
             transaction_capacity,
             transaction_view_state_container: TransactionViewStateContainer::with_capacity(
                 transaction_capacity,
+                true,
             ),
-            unprocessed_bundles: VecDeque::with_capacity(transaction_capacity),
+            unprocessed_bundles: MinMaxHeap::with_capacity(transaction_capacity),
             cost_model_buffered_bundles: VecDeque::with_capacity(transaction_capacity),
         }
     }
@@ -84,7 +162,7 @@ impl BundleStorage {
     /// Retries a bundle by inserting the transactions back into the transaction_view_state_container.
     /// The bundle is then pushed back to the cost_model_buffered_bundles queue.
     pub fn retry_bundle(&mut self, bundle: BundleStorageEntry) {
-        for (container_id, transaction) in bundle
+        for ((container_id, _, _), transaction) in bundle
             .container_ids
             .iter()
             .zip(bundle.transactions.into_iter())
@@ -97,6 +175,7 @@ impl BundleStorage {
         self.cost_model_buffered_bundles
             .push_back(BundleTransactionId {
                 container_ids: bundle.container_ids,
+                bundle_priority: bundle.bundle_priority,
             });
     }
 
@@ -104,7 +183,7 @@ impl BundleStorage {
     /// It's important that transactions in the BundleStorageEntry are not used after this call
     /// as it will lead to panic inside the TransactionViewStateContainer.
     pub fn destroy_bundle(&mut self, bundle: BundleStorageEntry) {
-        for container_id in bundle.container_ids.into_iter() {
+        for (container_id, _, _) in bundle.container_ids.into_iter() {
             self.transaction_view_state_container
                 .remove_by_id(container_id);
         }
@@ -113,25 +192,16 @@ impl BundleStorage {
     /// Pops a bundle from the unprocessed_bundles queue and returns it as a BundleStorageEntry.
     /// Returns None if there are no bundles to pop.
     pub fn pop_bundle(&mut self, slot: Slot) -> Option<BundleStorageEntry> {
-        if slot != self.last_slot {
-            // the cost_model_buffered_bundles has the oldest bundles at the front of the queue
-            // we need to pop from the back of that queue and insert to the front of the unprocessed_bundles queue so by the time we reach the front,
-            // the oldest bundle is at the front of the unprocessed_bundles queue
-            while let Some(bundle) = self.cost_model_buffered_bundles.pop_back() {
-                self.unprocessed_bundles.push_front(bundle);
-            }
-
-            self.last_slot = slot;
-        }
+        self.refresh_slot_boundary(slot);
 
         // only want to pop from the unprocessed bundles queue and wait for slot boundary to refresh from cost_model_buffered_bundles
-        let bundle = self.unprocessed_bundles.pop_front()?;
+        let bundle = self.unprocessed_bundles.pop_max()?;
 
         let (bundle_transactions, bundle_max_ages): (Vec<RuntimeTransactionView>, Vec<MaxAge>) =
             bundle
                 .container_ids
                 .iter()
-                .map(|id| {
+                .map(|(id, _, _)| {
                     self.transaction_view_state_container
                         .get_mut_transaction_state(*id)
                         .unwrap()
@@ -141,6 +211,7 @@ impl BundleStorage {
 
         Some(BundleStorageEntry {
             container_ids: bundle.container_ids,
+            bundle_priority: bundle.bundle_priority,
             transactions: bundle_transactions,
             max_ages: bundle_max_ages,
         })
@@ -152,7 +223,10 @@ impl BundleStorage {
         root_bank: &Bank,
         working_bank: &Bank,
         blacklisted_accounts: &HashSet<Pubkey>,
+        nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: &Sender<Signature>,
     ) -> Result<(), BundleStorageError> {
+        let block_engine_url = bundle.block_engine_url().to_string();
         let batch = bundle.take();
 
         // Packet checks
@@ -180,7 +254,7 @@ impl BundleStorage {
             return Err(BundleStorageError::ContainerFull);
         }
 
-        let mut container_ids: Vec<usize> = Vec::with_capacity(batch.len());
+        let mut container_ids: Vec<(usize, u64, u64)> = Vec::with_capacity(batch.len());
         let mut maybe_error = Ok(());
         let enable_static_instruction_limit = working_bank
             .feature_set
@@ -190,10 +264,16 @@ impl BundleStorage {
             .is_active(&agave_feature_set::limit_instruction_accounts::id());
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
 
+        let mut total_bundle_tip_amount = 0;
+        let mut total_bundle_reward = 0;
+        let mut nonce = None;
+        let mut blockhash = None;
+
         for (idx, packet) in batch.iter().enumerate() {
             // bundles shall contain all valid packets; checked above
             let packet_data = packet.data(..).unwrap();
 
+            let mut tx_reward = 0u64;
             // try to insert the packet into the container
             if let Some(container_id) = self
                 .transaction_view_state_container
@@ -207,7 +287,10 @@ impl BundleStorage {
                         transaction_account_lock_limit,
                         blacklisted_accounts,
                     ) {
-                        Ok(state) => Ok(state),
+                        Ok((state, reward_fee)) => {
+                            tx_reward = reward_fee;
+                            Ok(state)
+                        }
                         Err(e) => {
                             maybe_error = Err(e);
                             Err(())
@@ -215,10 +298,31 @@ impl BundleStorage {
                     }
                 })
             {
-                container_ids.push(container_id);
+                let transaction_state = self
+                    .transaction_view_state_container
+                    .get_mut_transaction_state(container_id)
+                    .unwrap();
+                let tip_amount = unsafe { fetch_bundle_tip(transaction_state.transaction()) };
+                let cus = transaction_state.cost();
+                total_bundle_tip_amount += tip_amount;
+
+                total_bundle_reward += tip_amount + tx_reward;
+                if nonce.is_none() {
+                    nonce = transaction_state
+                        .transaction()
+                        .as_sanitized_transaction()
+                        .get_durable_nonce()
+                        .copied();
+                    if let Some(_nonce) = nonce {
+                        blockhash =
+                            Some(transaction_state.transaction().recent_blockhash().clone());
+                    }
+                }
+
+                container_ids.push((container_id, tx_reward as u64, cus as u64));
             } else {
                 // any error shall rollback any transactions added to the container
-                for container_id in container_ids.iter() {
+                for (container_id, _, _) in container_ids.iter() {
                     self.transaction_view_state_container
                         .remove_by_id(*container_id);
                 }
@@ -229,17 +333,59 @@ impl BundleStorage {
             }
         }
 
-        let is_duplicate_hashes = self.does_contain_duplicate_hashes(&container_ids);
+        let is_duplicate_hashes = self.does_contain_duplicate_hashes(
+            &container_ids
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect::<Vec<usize>>(),
+        );
         if is_duplicate_hashes {
-            for container_id in container_ids.iter() {
+            for (container_id, _, _) in container_ids.iter() {
                 self.transaction_view_state_container
                     .remove_by_id(*container_id);
             }
             return Err(BundleStorageError::DuplicateTransaction);
         }
+        total_bundle_tip_amount = total_bundle_tip_amount.saturating_mul(1_000_000);
+        if total_bundle_tip_amount == 0 {
+            for (container_id, _, _) in container_ids.iter() {
+                self.transaction_view_state_container
+                    .remove_by_id(*container_id);
+            }
+            return Err(BundleStorageError::ZeroTipAmount(block_engine_url));
+        }
 
-        self.unprocessed_bundles
-            .push_back(BundleTransactionId { container_ids });
+        let mut total_rewards = 0;
+        let mut total_cus = 0;
+
+        for (_, reward, cus) in container_ids.iter() {
+            total_rewards += reward;
+            total_cus += cus;
+        }
+
+        total_rewards = total_rewards + total_bundle_tip_amount;
+
+        let bundle_priority = total_rewards.saturating_div(total_cus.saturating_add(1));
+
+        if let (Some(nonce), Some(blockhash)) = (nonce, blockhash) {
+            if let Ok(nonce_packets) = nonce_packets.read() {
+                if let Some((max_sig, max_reward)) = nonce_packets.get(&(nonce, blockhash)) {
+                    if *max_reward >= total_bundle_reward {
+                        for (container_id, _, _) in container_ids.iter() {
+                            self.transaction_view_state_container
+                                .remove_by_id(*container_id);
+                        }
+                        let _ = nonce_packet_sender.send(*max_sig);
+                        return Err(BundleStorageError::DuplicateNonce);
+                    }
+                }
+            }
+        }
+
+        self.unprocessed_bundles.push(BundleTransactionId {
+            container_ids,
+            bundle_priority,
+        });
 
         Ok(())
     }
@@ -261,13 +407,13 @@ impl BundleStorage {
     }
 
     pub fn clear(&mut self) {
-        for bundle in self.unprocessed_bundles.drain(..) {
-            for id in bundle.container_ids.iter() {
+        while let Some(bundle) = self.unprocessed_bundles.pop_max() {
+            for (id, _, _) in bundle.container_ids.iter() {
                 self.transaction_view_state_container.remove_by_id(*id);
             }
         }
         for bundle in self.cost_model_buffered_bundles.drain(..) {
-            for id in bundle.container_ids.iter() {
+            for (id, _, _) in bundle.container_ids.iter() {
                 self.transaction_view_state_container.remove_by_id(*id);
             }
         }
