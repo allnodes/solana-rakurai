@@ -1,5 +1,7 @@
 //! The `metrics` module enables sending measurements to an `InfluxDB` instance
 
+#[cfg(not(feature = "without_influxdb"))]
+use reqwest;
 use {
     crate::{counter::CounterPoint, datapoint::DataPoint},
     crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError},
@@ -26,6 +28,7 @@ type CounterMap = HashMap<(&'static str, u64), CounterPoint>;
 pub enum MetricsError {
     #[error(transparent)]
     VarError(#[from] env::VarError),
+    #[cfg(not(feature = "without_influxdb"))]
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
     #[error("SOLANA_METRICS_CONFIG is invalid: '{0}'")]
@@ -68,14 +71,32 @@ pub trait MetricsWriter {
     fn write(&self, points: Vec<DataPoint>);
 }
 
+#[cfg(not(feature = "without_influxdb"))]
 struct InfluxDbMetricsWriter {
     write_url: Option<String>,
+    extra_stats_write_url: Option<String>,
+    rakurai_write_url: Option<String>,
 }
 
+#[cfg(feature = "without_influxdb")]
+struct InfluxDbMetricsWriter {
+    // No-op implementation when influxdb feature is disabled
+}
+
+#[cfg(feature = "without_influxdb")]
+impl InfluxDbMetricsWriter {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[cfg(not(feature = "without_influxdb"))]
 impl InfluxDbMetricsWriter {
     fn new() -> Self {
         Self {
             write_url: Self::build_write_url().ok(),
+            extra_stats_write_url: Self::build_extra_stats_write_url().ok(),
+            rakurai_write_url: Self::build_rakurai_write_url().ok(),
         }
     }
 
@@ -97,43 +118,174 @@ impl InfluxDbMetricsWriter {
 
         Ok(write_url)
     }
+
+    // copy of build_write_url with different db name
+    fn build_extra_stats_write_url() -> Result<String, MetricsError> {
+        let config = get_metrics_config().map_err(|err| {
+            info!("metrics disabled: {}", err);
+            err
+        })?;
+
+        info!(
+            "metrics configuration: host={} db={} username={}",
+            config.host, config.db, config.username
+        );
+
+        let write_url = format!(
+            "{}/write?db={}_extra_stats&u={}&p={}&precision=n",
+            &config.host, &config.db, &config.username, &config.password
+        );
+
+        Ok(write_url)
+    }
+
+    fn build_rakurai_write_url() -> Result<String, MetricsError> {
+        let config = get_rakurai_metrics_config().map_err(|err| {
+            info!("rakurai metrics disabled: {err}");
+            err
+        })?;
+
+        info!(
+            "rakurai metrics configuration: host={} db={} username={}",
+            config.host, config.db, config.username
+        );
+
+        let write_url = format!(
+            "{}/write?db={}&u={}&p={}&precision=n",
+            &config.host, &config.db, &config.username, &config.password
+        );
+
+        Ok(write_url)
+    }
 }
 
-pub fn serialize_points(points: &Vec<DataPoint>, host_id: &str) -> String {
+// copy of build_write_url with different db name
+#[allow(dead_code)]
+fn build_extra_stats_write_url() -> Result<String, MetricsError> {
+    let config = get_metrics_config().map_err(|err| {
+        info!("metrics disabled: {}", err);
+        err
+    })?;
+
+    info!(
+        "metrics configuration: host={} db={} username={}",
+        config.host, config.db, config.username
+    );
+
+    let write_url = format!(
+        "{}/write?db={}_extra_stats&u={}&p={}&precision=n",
+        &config.host, &config.db, &config.username, &config.password
+    );
+
+    Ok(write_url)
+}
+
+fn calculate_len(len: &mut usize, point: &DataPoint, host_id: &str) {
     const TIMESTAMP_LEN: usize = 20;
     const HOST_ID_LEN: usize = 8; // "host_id=".len()
     const EXTRA_LEN: usize = 2; // "=,".len()
-    let mut len = 0;
-    for point in points {
-        for (name, value) in &point.fields {
-            len += name.len() + value.len() + EXTRA_LEN;
-        }
-        for (name, value) in &point.tags {
-            len += name.len() + value.len() + EXTRA_LEN;
-        }
-        len += point.name.len();
-        len += TIMESTAMP_LEN;
-        len += host_id.len() + HOST_ID_LEN;
+    for (name, value) in &point.fields {
+        *len += name.len() + value.len() + EXTRA_LEN;
     }
-    let mut line = String::with_capacity(len);
-    for point in points {
-        let _ = write!(line, "{},host_id={}", &point.name, host_id);
-        for (name, value) in point.tags.iter() {
-            let _ = write!(line, ",{name}={value}");
-        }
-
-        let mut first = true;
-        for (name, value) in point.fields.iter() {
-            let _ = write!(line, "{}{}={}", if first { ' ' } else { ',' }, name, value);
-            first = false;
-        }
-        let timestamp = point.timestamp.duration_since(UNIX_EPOCH);
-        let nanos = timestamp.unwrap().as_nanos();
-        let _ = writeln!(line, " {nanos}");
+    for (name, value) in &point.tags {
+        *len += name.len() + value.len() + EXTRA_LEN;
     }
-    line
+    *len += point.name.len();
+    *len += TIMESTAMP_LEN;
+    *len += host_id.len() + HOST_ID_LEN;
 }
 
+fn serialize_into_string(line: &mut String, point: &DataPoint, host_id: &str) {
+    let _ = write!(line, "{},host_id={}", &point.name, host_id);
+    for (name, value) in point.tags.iter() {
+        let _ = write!(line, ",{name}={value}");
+    }
+
+    let mut first = true;
+    for (name, value) in point.fields.iter() {
+        let _ = write!(line, "{}{}={}", if first { ' ' } else { ',' }, name, value);
+        first = false;
+    }
+    let timestamp = point.timestamp.duration_since(UNIX_EPOCH);
+    let nanos = timestamp.unwrap().as_nanos();
+    let _ = writeln!(line, " {nanos}");
+}
+
+pub fn serialize_points(
+    points: &Vec<DataPoint>,
+    host_id: &str,
+) -> (String, Option<String>, Option<String>) {
+    let mut len = 0;
+    let mut extra_stats_log_len = 0;
+    let mut rakurai_log_len = 0;
+    for point in points {
+        if point.name.starts_with("rakurai") {
+            calculate_len(&mut rakurai_log_len, point, host_id);
+        } else if point.name.contains("extra_stats") {
+            calculate_len(&mut extra_stats_log_len, point, host_id);
+        } else {
+            calculate_len(&mut len, point, host_id);
+        }
+    }
+
+    let mut line = String::with_capacity(len);
+    let mut extra_stats_log_line = String::with_capacity(extra_stats_log_len);
+    let mut rakurai_log_line = String::with_capacity(rakurai_log_len);
+    for point in points {
+        if point.name.starts_with("rakurai") {
+            serialize_into_string(&mut rakurai_log_line, point, host_id);
+        } else if point.name.contains("extra_stats") {
+            serialize_into_string(&mut extra_stats_log_line, point, host_id);
+        } else {
+            serialize_into_string(&mut line, point, host_id);
+        }
+    }
+    let extra_stats_log_line = if extra_stats_log_len == 0 {
+        None
+    } else {
+        Some(extra_stats_log_line)
+    };
+    let rakurai_log_line = if rakurai_log_len == 0 {
+        None
+    } else {
+        Some(rakurai_log_line)
+    };
+
+    (line, extra_stats_log_line, rakurai_log_line)
+}
+
+#[allow(dead_code)]
+fn send_datapoints_to_db(write_url: &String, line: String, skip_warning: bool) {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build();
+    let client = match client {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("client instantiation failed: {}", err);
+            return;
+        }
+    };
+
+    let response = client.post(write_url.as_str()).body(line).send();
+    if let Ok(resp) = response {
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp
+                .text()
+                .unwrap_or_else(|_| "[text body empty]".to_string());
+            if !skip_warning {
+                warn!("submit response unsuccessful: {} {}", status, text,);
+            }
+        }
+    } else {
+        if !skip_warning {
+            warn!("submit error: {}", response.unwrap_err());
+        }
+    }
+}
+
+#[cfg(not(feature = "without_influxdb"))]
 impl MetricsWriter for InfluxDbMetricsWriter {
     fn write(&self, points: Vec<DataPoint>) {
         if let Some(ref write_url) = self.write_url {
@@ -141,35 +293,32 @@ impl MetricsWriter for InfluxDbMetricsWriter {
 
             let host_id = HOST_ID.read().unwrap();
 
-            let line = serialize_points(&points, &host_id);
+            let (line, extra_stats_log_line, rakurai_log_line) =
+                serialize_points(&points, &host_id);
 
-            let client = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build();
-            let client = match client {
-                Ok(client) => client,
-                Err(err) => {
-                    warn!("client instantiation failed: {err}");
-                    return;
-                }
-            };
+            send_datapoints_to_db(write_url, line, false);
 
-            let response = client.post(write_url.as_str()).body(line).send();
-            if let Ok(resp) = response {
-                let status = resp.status();
-                if !status.is_success() {
-                    let text = resp
-                        .text()
-                        .unwrap_or_else(|_| "[text body empty]".to_string());
-                    warn!("submit response unsuccessful: {status} {text}",);
+            if let Some(ref extra_stats_write_url) = self.extra_stats_write_url {
+                if let Some(extra_stats_log_line) = extra_stats_log_line {
+                    send_datapoints_to_db(extra_stats_write_url, extra_stats_log_line, true);
                 }
-            } else {
-                warn!("submit error: {}", response.unwrap_err());
+            }
+
+            if let Some(ref rakurai_write_url) = self.rakurai_write_url {
+                if let Some(rakurai_log_line) = rakurai_log_line {
+                    send_datapoints_to_db(rakurai_write_url, rakurai_log_line, true);
+                }
             }
         }
     }
 }
 
+#[cfg(feature = "without_influxdb")]
+impl MetricsWriter for InfluxDbMetricsWriter {
+    fn write(&self, _points: Vec<DataPoint>) {
+        // No-op implementation when influxdb feature is disabled
+    }
+}
 impl Default for MetricsAgent {
     fn default() -> Self {
         let max_points_per_sec = env::var("SOLANA_METRICS_MAX_POINTS_PER_SECOND")
@@ -387,12 +536,15 @@ impl Drop for MetricsAgent {
     }
 }
 
+#[no_mangle]
+pub static AGENT: std::sync::LazyLock<MetricsAgent> =
+    std::sync::LazyLock::new(MetricsAgent::default);
+
 fn get_singleton_agent() -> &'static MetricsAgent {
-    static AGENT: std::sync::LazyLock<MetricsAgent> =
-        std::sync::LazyLock::new(MetricsAgent::default);
     &AGENT
 }
 
+#[no_mangle]
 static HOST_ID: std::sync::LazyLock<RwLock<String>> = std::sync::LazyLock::new(|| {
     RwLock::new({
         let hostname: String = gethostname()
@@ -471,6 +623,35 @@ fn get_metrics_config() -> Result<MetricsConfig, MetricsError> {
     Ok(config)
 }
 
+fn get_rakurai_metrics_config() -> Result<MetricsConfig, MetricsError> {
+    let mut config = MetricsConfig::default();
+    let config_var = env::var("RAKURAI_METRICS_CONFIG")?;
+    if config_var.is_empty() {
+        Err(env::VarError::NotPresent)?;
+    }
+
+    for pair in config_var.split(',') {
+        let nv: Vec<_> = pair.split('=').collect();
+        if nv.len() != 2 {
+            return Err(MetricsError::ConfigInvalid(pair.to_string()));
+        }
+        let v = nv[1].to_string();
+        match nv[0] {
+            "host" => config.host = v,
+            "db" => config.db = v,
+            "u" => config.username = v,
+            "p" => config.password = v,
+            _ => return Err(MetricsError::ConfigInvalid(pair.to_string())),
+        }
+    }
+
+    if !config.complete() {
+        return Err(MetricsError::ConfigIncomplete);
+    }
+
+    Ok(config)
+}
+
 pub fn metrics_config_sanity_check(cluster_type: ClusterType) -> Result<(), MetricsError> {
     let config = match get_metrics_config() {
         Ok(config) => config,
@@ -488,6 +669,7 @@ pub fn metrics_config_sanity_check(cluster_type: ClusterType) -> Result<(), Metr
     Err(MetricsError::DbMismatch(msg))
 }
 
+#[cfg(not(feature = "without_influxdb"))]
 pub fn query(q: &str) -> Result<String, MetricsError> {
     let config = get_metrics_config()?;
     let query_url = format!(
@@ -498,6 +680,11 @@ pub fn query(q: &str) -> Result<String, MetricsError> {
     let response = reqwest::blocking::get(query_url.as_str())?.text()?;
 
     Ok(response)
+}
+
+#[cfg(feature = "without_influxdb")]
+pub fn query(_q: &str) -> Result<String, MetricsError> {
+    Err(MetricsError::ConfigIncomplete)
 }
 
 /// Blocks until all pending points from previous calls to `submit` have been
