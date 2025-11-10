@@ -1,2 +1,6 @@
 [toolchain]
 channel = "1.93.1"
+# rust-analyzer must match rustc's proc-macro ABI (e.g. serde_derive metadata).
+# Without this, rustup may fall back to an older system rust-analyzer and the
+# IDE reports "unsupported metadata version 10" for proc macros.
+components = ["rust-src", "rust-analyzer"]

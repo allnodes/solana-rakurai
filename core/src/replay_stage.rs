@@ -805,9 +805,11 @@ impl ReplayStage {
                     &replay_tx_thread_pool,
                     prioritization_fee_cache.as_deref(),
                     &mut purge_repair_slot_counter,
+                    &poh_recorder,
                     (!migration_status.is_alpenglow_enabled()).then_some(&mut tbft_structs),
                     migration_status.as_ref(),
                     &votor_event_sender,
+                    &leader_schedule_cache,
                 );
                 let did_complete_bank = !new_frozen_slots.is_empty();
                 if migration_status.is_alpenglow_enabled() {
@@ -2466,6 +2468,19 @@ impl ReplayStage {
         log_messages_bytes_limit: Option<usize>,
         prioritization_fee_cache: Option<&PrioritizationFeeCache>,
         migration_status: &MigrationStatus,
+        tick_notifier: Option<
+            Arc<
+                dyn Fn(
+                        solana_clock::Slot,
+                        u64,
+                        &solana_entry::poh::PohEntry,
+                        Option<&solana_pubkey::Pubkey>,
+                        u32,
+                    ) + Send
+                    + Sync,
+            >,
+        >,
+        leader_schedule_cache: &LeaderScheduleCache,
     ) -> result::Result<usize, BlockstoreProcessorError> {
         let mut w_replay_stats = replay_stats.write().unwrap();
         let mut w_replay_progress = replay_progress.write().unwrap();
@@ -2487,6 +2502,8 @@ impl ReplayStage {
             log_messages_bytes_limit,
             prioritization_fee_cache,
             migration_status,
+            tick_notifier,
+            Some(leader_schedule_cache),
         )?;
         let tx_count_after = w_replay_progress.num_txs;
         let tx_count = tx_count_after - tx_count_before;
@@ -3134,6 +3151,8 @@ impl ReplayStage {
         active_bank_slots: &[Slot],
         prioritization_fee_cache: Option<&PrioritizationFeeCache>,
         migration_status: &MigrationStatus,
+        poh_recorder: &RwLock<PohRecorder>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> Vec<ReplaySlotFromBlockstore> {
         // Make mutable shared structures thread safe.
         let progress = RwLock::new(progress);
@@ -3240,6 +3259,13 @@ impl ReplayStage {
                     if bank.leader_id() != my_pubkey {
                         let mut replay_blockstore_time =
                             Measure::start("replay_blockstore_into_bank");
+                        // Performance optimization: Clone the tick_notifier Arc without holding the lock.
+                        // This allows us to release the lock immediately after cloning, minimizing
+                        // lock contention with the PoH service thread.
+                        let tick_notifier = {
+                            let poh_recorder_guard = poh_recorder.read().unwrap();
+                            poh_recorder_guard.tick_notifier()
+                        };
                         let blockstore_result = Self::replay_blockstore_into_bank(
                             &bank,
                             blockstore,
@@ -3252,6 +3278,8 @@ impl ReplayStage {
                             log_messages_bytes_limit,
                             prioritization_fee_cache,
                             migration_status,
+                            tick_notifier,
+                            leader_schedule_cache,
                         );
                         replay_blockstore_time.stop();
                         replay_result.replay_result = Some(blockstore_result);
@@ -3286,6 +3314,8 @@ impl ReplayStage {
         bank_slot: Slot,
         prioritization_fee_cache: Option<&PrioritizationFeeCache>,
         migration_status: &MigrationStatus,
+        poh_recorder: &RwLock<PohRecorder>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> ReplaySlotFromBlockstore {
         let mut replay_result = ReplaySlotFromBlockstore {
             is_slot_dead: false,
@@ -3353,6 +3383,12 @@ impl ReplayStage {
 
             if bank.leader_id() != my_pubkey {
                 let mut replay_blockstore_time = Measure::start("replay_blockstore_into_bank");
+                // Performance optimization: Clone the tick_notifier Arc without holding the lock.
+                // See comment in replay_active_banks_concurrently for details.
+                let tick_notifier = {
+                    let poh_recorder_guard = poh_recorder.read().unwrap();
+                    poh_recorder_guard.tick_notifier()
+                };
                 let blockstore_result = Self::replay_blockstore_into_bank(
                     &bank,
                     blockstore,
@@ -3365,6 +3401,8 @@ impl ReplayStage {
                     log_messages_bytes_limit,
                     prioritization_fee_cache,
                     migration_status,
+                    tick_notifier,
+                    leader_schedule_cache,
                 );
                 replay_blockstore_time.stop();
                 replay_result.replay_result = Some(blockstore_result);
@@ -3767,9 +3805,11 @@ impl ReplayStage {
         replay_tx_thread_pool: &ThreadPool,
         prioritization_fee_cache: Option<&PrioritizationFeeCache>,
         purge_repair_slot_counter: &mut PurgeRepairSlotCounter,
+        poh_recorder: &RwLock<PohRecorder>,
         tbft_structs: Option<&mut TowerBFTStructures>,
         migration_status: &MigrationStatus,
         votor_event_sender: &VotorEventSender,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> Vec<Slot> /* completed slots */ {
         let active_bank_slots = bank_forks.read().unwrap().active_bank_slots();
         let num_active_banks = active_bank_slots.len();
@@ -3798,6 +3838,8 @@ impl ReplayStage {
                     &active_bank_slots,
                     prioritization_fee_cache,
                     migration_status,
+                    poh_recorder,
+                    leader_schedule_cache,
                 )
             }
             ForkReplayMode::Serial | ForkReplayMode::Parallel(_) => active_bank_slots
@@ -3819,6 +3861,8 @@ impl ReplayStage {
                         *bank_slot,
                         prioritization_fee_cache,
                         migration_status,
+                        poh_recorder,
+                        leader_schedule_cache,
                     )
                 })
                 .collect(),
@@ -5599,6 +5643,8 @@ pub(crate) mod tests {
                     None,
                     None,
                     &MigrationStatus::default(),
+                    tick_notifier,
+                    &leader_schedule_cache,
                 )),
             }
         };
@@ -5699,6 +5745,7 @@ pub(crate) mod tests {
                 .thread_name(|i| format!("solReplayTest{i:02}"))
                 .build()
                 .expect("new rayon threadpool");
+            let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&bank0));
             let res = ReplayStage::replay_blockstore_into_bank(
                 &bank1,
                 &blockstore,
@@ -5711,6 +5758,8 @@ pub(crate) mod tests {
                 None,
                 Some(&PrioritizationFeeCache::new(0u64)),
                 &MigrationStatus::default(),
+                None, // tick_notifier
+                &leader_schedule_cache,
             )
             .and_then(|replay_tx_count| {
                 let mut poh_verify_elapsed = 0;

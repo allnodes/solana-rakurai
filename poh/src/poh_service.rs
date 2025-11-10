@@ -39,7 +39,7 @@ pub const DEFAULT_HASHES_PER_BATCH: u64 =
 
 pub const DEFAULT_PINNED_CPU_CORE: usize = 0;
 
-const TARGET_SLOT_ADJUSTMENT_NS: u64 = 50_000_000;
+pub const TARGET_SLOT_ADJUSTMENT_NS: u64 = 50_000_000;
 
 #[derive(Debug)]
 struct PohTiming {
@@ -106,6 +106,7 @@ impl PohService {
         poh_service_receiver: PohServiceMessageReceiver,
         migration_status: Arc<MigrationStatus>,
         record_receiver_sender: Sender<RecordReceiver>,
+        target_slot_adjustment_ns: u64,
     ) -> Self {
         let poh_config = poh_config.clone();
         let tick_producer = Builder::new()
@@ -152,7 +153,9 @@ impl PohService {
                     let target_ns_per_tick = Self::target_ns_per_tick(
                         ticks_per_slot,
                         poh_config.target_tick_duration.as_nanos() as u64,
+                        target_slot_adjustment_ns,
                     );
+
                     Self::tick_producer(
                         poh_recorder,
                         &poh_exit,
@@ -162,7 +165,7 @@ impl PohService {
                         poh_service_receiver,
                         target_ns_per_tick,
                         &migration_status.shutdown_poh,
-                    )
+                    );
                 }
 
                 if poh_exit.load(Ordering::Relaxed)
@@ -195,12 +198,19 @@ impl PohService {
         Self { tick_producer }
     }
 
-    pub fn target_ns_per_tick(ticks_per_slot: u64, target_tick_duration_ns: u64) -> u64 {
+    pub fn target_ns_per_tick(
+        ticks_per_slot: u64,
+        target_tick_duration_ns: u64,
+        target_slot_adjustment_ns: u64,
+    ) -> u64 {
         // Account for some extra time outside of PoH generation to account
         // for processing time outside PoH.
-        let adjustment_per_tick = TARGET_SLOT_ADJUSTMENT_NS
-            .checked_div(ticks_per_slot)
-            .unwrap_or(0);
+        let adjustment_per_tick = if ticks_per_slot > 0 {
+            target_slot_adjustment_ns / ticks_per_slot
+        } else {
+            0
+        };
+
         target_tick_duration_ns.saturating_sub(adjustment_per_tick)
     }
 

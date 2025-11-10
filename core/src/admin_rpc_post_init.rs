@@ -2,7 +2,10 @@ use {
     crate::{
         banking_stage::BankingControlMsg,
         cluster_slots_service::cluster_slots::ClusterSlots,
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::{
+            block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
+            relayer_stage::RelayerConfig,
+        },
         repair::{outstanding_requests::OutstandingRequests, serve_repair::ShredRepairType},
     },
     arc_swap::ArcSwap,
@@ -95,6 +98,8 @@ pub struct AdminRpcRequestMetadataPostInit {
     pub snapshot_controller: Arc<SnapshotController>,
     pub blockstore: Arc<Blockstore>,
     pub block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+    pub secondary_block_engine_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+    pub block_engine_uuid_blocklist: Arc<ArcSwap<Vec<String>>>,
     pub relayer_config: Arc<ArcSwap<RelayerConfig>>,
     pub shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
     pub shred_retransmit_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
