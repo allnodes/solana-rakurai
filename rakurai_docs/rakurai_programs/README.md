@@ -1,0 +1,12 @@
+# Rakurai Programs
+
+A collection of Solana smart contracts and tools required for **Rakurai’s validator operations**.
+
+## 1. Documentation
+
+| Section | Description |
+| ------- | ----------- |
+| [Rakurai Activation](./programs/rakurai_activation/README.md) | Multisig-controlled smart contract that authorizes and manages validators running Rakurai nodes. |
+| [Reward Distribution](./programs/reward_distribution/README.md) | Distributes block rewards to stakers via per-epoch RCA and post-epoch Merkle claims; tracks on-chain tip and MevShare revenue in per-validator, per-service [Tips Collection Accounts and MevShare Collection Accounts](./programs/reward_distribution/README.md#5-tip-and-mevshare-collection-accounts) (TCA / MCA). |
+| [Rakurai Tip Manager](./programs/rakurai_tip_manager/README.md) | Manages tips sent to Rakurai validators across eight tip PDAs; drains and splits tips to the validator's [Tips Collection Account](./programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca) (TCA). |
+| [Rakurai Activation CLI](./cli/README.md) | Command-line tool for interacting with the Rakurai Activation program — initialize a [Rakurai Activation Account](./programs/rakurai_activation/README.md#4-rakurai-activation-account-creation), enable/disable the scheduler, and update commission settings. |
