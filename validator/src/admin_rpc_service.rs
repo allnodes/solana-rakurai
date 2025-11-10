@@ -15,7 +15,7 @@ use {
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         banking_stage::{
-            BankingControlMsg, BankingStage,
+            BankingControlMsg, BankingStage, RakuraiConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         consensus::{Tower, tower_storage::TowerStorage},
@@ -25,7 +25,8 @@ use {
         },
         repair::repair_service,
         validator::{
-            BlockProductionMethod, SchedulerPacing, TransactionStructure, ValidatorStartProgress,
+            BlockProductionMethod, ClientMode, SchedulerPacing, TransactionStructure,
+            ValidatorStartProgress,
         },
     },
     solana_geyser_plugin_manager::GeyserPluginManagerRequest,
@@ -45,7 +46,7 @@ use {
         path::{Path, PathBuf},
         str::FromStr,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, Builder},
@@ -68,6 +69,9 @@ pub struct AdminRpcRequestMetadata {
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<ArcSwap<Option<String>>>,
+    pub client_mode: Arc<Mutex<ClientMode>>,
+    pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
+    pub reset_rakurai: Arc<AtomicBool>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -308,8 +312,24 @@ pub trait AdminRpc {
         trust_packets: bool,
     ) -> Result<()>;
 
+    #[rpc(meta, name = "setSecondaryBlockEngineUrls")]
+    fn set_secondary_block_engine_urls(
+        &self,
+        meta: Self::Metadata,
+        secondary_block_engine_urls: Vec<String>,
+    ) -> Result<()>;
+
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
+
+    #[rpc(meta, name = "setClientMode")]
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()>;
+
+    #[rpc(meta, name = "setRakuraiConfig")]
+    fn set_rakurai_config(&self, meta: Self::Metadata, config_json: String) -> Result<()>;
+
+    #[rpc(meta, name = "resetRakurai")]
+    fn reset_rakurai(&self, meta: Self::Metadata) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -620,6 +640,21 @@ impl AdminRpc for AdminRpcImpl {
         })
     }
 
+    fn set_secondary_block_engine_urls(
+        &self,
+        meta: Self::Metadata,
+        secondary_block_engine_urls: Vec<String>,
+    ) -> Result<()> {
+        debug!("set_secondary_block_engine_urls request received");
+
+        meta.with_post_init(|post_init| {
+            post_init
+                .secondary_block_engine_urls
+                .store(Arc::new(secondary_block_engine_urls));
+            Ok(())
+        })
+    }
+
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()> {
         let manual_disconnect = bam_url.as_deref().is_some_and(|url| url.trim().is_empty());
         let bam_url = bam_url.filter(|url| !url.trim().is_empty());
@@ -647,6 +682,65 @@ impl AdminRpc for AdminRpcImpl {
         }
 
         meta.bam_url.store(Arc::new(bam_url));
+        Ok(())
+    }
+
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()> {
+        let old_client_mode = meta.client_mode.lock().unwrap().clone();
+        info!(
+            "set_client_mode old= {}, new={}",
+            old_client_mode, client_mode
+        );
+
+        let new_client_mode = ClientMode::from_str(&client_mode).map_err(|e| {
+            jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}. Valid options: {:?}",
+                client_mode,
+                e,
+                ClientMode::cli_names()
+            ))
+        })?;
+
+        if new_client_mode == ClientMode::RakuraiBAM {
+            return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}",
+                client_mode, "RakuraiBAM is not allowed for now",
+            )));
+        }
+
+        if new_client_mode != ClientMode::RakuraiJito {
+            if meta.bam_url.load().is_some() {
+                *meta.client_mode.lock().unwrap() = new_client_mode;
+            } else {
+                *meta.client_mode.lock().unwrap() = ClientMode::RakuraiJito;
+                info!(
+                    "BAM URL not specified, Please set bam-url first before switching client mode"
+                );
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "BAM URL not specified, Please set bam-url first before switching client mode",
+                ));
+            }
+        } else {
+            *meta.client_mode.lock().unwrap() = new_client_mode;
+        }
+        Ok(())
+    }
+
+    fn set_rakurai_config(&self, meta: Self::Metadata, config_json: String) -> Result<()> {
+        let config: RakuraiConfig = serde_json::from_str(&config_json).map_err(|e| {
+            jsonrpc_core::error::Error::invalid_params(format!("Invalid RakuraiConfig JSON: {e}"))
+        })?;
+
+        let old = meta.rakurai_config.read().unwrap().clone();
+        info!("set_rakurai_config old={:?}, new={:?}", old, config);
+
+        *meta.rakurai_config.write().unwrap() = config;
+        Ok(())
+    }
+
+    fn reset_rakurai(&self, meta: Self::Metadata) -> Result<()> {
+        info!("reset_rakurai request received");
+        meta.reset_rakurai.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -1299,6 +1393,7 @@ mod tests {
                 votor_event_sender
             });
             let block_engine_config = Arc::new(ArcSwap::from_pointee(BlockEngineConfig::default()));
+            let secondary_block_engine_urls = Arc::new(ArcSwap::from_pointee(vec![]));
             let relayer_config = Arc::new(ArcSwap::from_pointee(RelayerConfig::default()));
             let shred_receiver_addresses =
                 Arc::new(ArcSwap::from_pointee(ShredReceiverAddresses::new()));
@@ -1330,6 +1425,7 @@ mod tests {
                     blockstore,
                     votor_event_sender,
                     block_engine_config,
+                    secondary_block_engine_urls,
                     relayer_config,
                     shred_receiver_addresses,
                     shred_retransmit_receiver_addresses,
@@ -1337,6 +1433,19 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(ArcSwap::from_pointee(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
+                rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                    rs_mode: RakuraiMode::Mode1,
+                    rs_cfg_d1: 40,
+                    rs_cfg_ct1: 65,
+                    rs_cfg_nd1: 30,
+                    rs_cfg_ff1: 1.0,
+                    rs_cfg_ft1: 400,
+                    rs_cfg_tf1: 1.077,
+                    rs_cfg_ntft: 500,
+                    rs_cfg_nm: 1,
+                })),
+                reset_rakurai: Arc::new(AtomicBool::new(false)),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1452,6 +1561,19 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(ArcSwap::from_pointee(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
+                rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                    rs_mode: RakuraiMode::Mode1,
+                    rs_cfg_d1: 40,
+                    rs_cfg_ct1: 65,
+                    rs_cfg_nd1: 30,
+                    rs_cfg_ff1: 1.0,
+                    rs_cfg_ft1: 400,
+                    rs_cfg_tf1: 1.077,
+                    rs_cfg_ntft: 500,
+                    rs_cfg_nm: 1,
+                })),
+                reset_rakurai: Arc::new(AtomicBool::new(false)),
             };
 
             let _validator = Validator::new(

@@ -23,6 +23,7 @@ use {
     solana_runtime::bank_forks::SharableBanks,
     solana_streamer::streamer::{self, StreamerError},
     solana_transaction::Transaction,
+    std::sync::atomic::AtomicBool,
     std::{
         num::NonZeroUsize,
         sync::{
@@ -195,6 +196,7 @@ impl SigVerifyStage {
         num_workers: NonZeroUsize,
         forward_non_votes: bool,
         sharable_banks: SharableBanks,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> (Self, GossipSigVerifyHandle) {
         let (gossip_verified_vote_sender, verified_vote_receiver) = unbounded();
         let non_vote_stats = SigVerifierStats::default();
@@ -215,6 +217,7 @@ impl SigVerifyStage {
                 total_valid_packets: tpu_vote_stats.total_valid_packets.clone(),
                 total_verify_time_us: tpu_vote_stats.total_verify_time_us.clone(),
             },
+            input_tx_signature_sender,
         );
         let non_vote_thread_hdl = Self::verifier_service(
             packet_receiver,
@@ -452,6 +455,7 @@ mod tests {
             NonZeroUsize::new(4).unwrap(),
             false,
             sharable_banks,
+            None,
         );
 
         let now = Instant::now();
@@ -526,6 +530,7 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
             false,
             sharable_banks,
+            None,
         );
 
         let mut bytes_batch = BytesPacketBatch::with_capacity(1);

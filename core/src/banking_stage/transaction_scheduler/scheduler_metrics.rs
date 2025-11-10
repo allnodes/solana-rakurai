@@ -10,8 +10,8 @@ use {
 
 pub struct SchedulerCountMetrics {
     id: String,
-    interval: IntervalSchedulerCountMetrics,
-    slot: SlotSchedulerCountMetrics,
+    pub interval: IntervalSchedulerCountMetrics,
+    pub slot: SlotSchedulerCountMetrics,
 }
 
 impl Default for SchedulerCountMetrics {
@@ -52,15 +52,15 @@ impl SchedulerCountMetrics {
 }
 
 #[derive(Default)]
-struct IntervalSchedulerCountMetrics {
+pub struct IntervalSchedulerCountMetrics {
     interval: AtomicInterval,
-    metrics: SchedulerCountMetricsInner,
+    pub metrics: SchedulerCountMetricsInner,
 }
 
 #[derive(Default)]
-struct SlotSchedulerCountMetrics {
+pub struct SlotSchedulerCountMetrics {
     slot: Option<Slot>,
-    metrics: SchedulerCountMetricsInner,
+    pub metrics: SchedulerCountMetricsInner,
 }
 
 #[derive(Default)]
@@ -112,11 +112,11 @@ pub struct SchedulerCountMetricsInner {
 
 impl IntervalSchedulerCountMetrics {
     fn maybe_report_and_reset(&mut self, should_report: bool, id: &str) {
+        let name = "banking_stage_scheduler_counts";
         const REPORT_INTERVAL_MS: u64 = 1000;
         if self.interval.should_update(REPORT_INTERVAL_MS) {
             if should_report {
-                self.metrics
-                    .report("banking_stage_scheduler_counts", None, id);
+                self.metrics.report(name, None, id);
             }
             self.metrics.reset();
         }
@@ -125,11 +125,11 @@ impl IntervalSchedulerCountMetrics {
 
 impl SlotSchedulerCountMetrics {
     fn maybe_report_and_reset(&mut self, slot: Option<Slot>, id: &str) {
+        let name = "bam_banking_stage_scheduler_slot_counts";
         if self.slot != slot {
             // Only report if there was an assigned slot.
             if self.slot.is_some() {
-                self.metrics
-                    .report("banking_stage_scheduler_slot_counts", self.slot, id);
+                self.metrics.report(name, self.slot, id);
             }
             self.metrics.reset();
             self.slot = slot;
@@ -228,7 +228,7 @@ impl SchedulerCountMetricsInner {
             || self.num_retryable != Saturating(0)
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.num_received = Saturating(0);
         self.num_buffered = Saturating(0);
         self.num_scheduled = Saturating(0);
@@ -275,8 +275,8 @@ impl SchedulerCountMetricsInner {
 
 pub struct SchedulerTimingMetrics {
     id: String,
-    interval: IntervalSchedulerTimingMetrics,
-    slot: SlotSchedulerTimingMetrics,
+    pub interval: IntervalSchedulerTimingMetrics,
+    pub slot: SlotSchedulerTimingMetrics,
 }
 
 impl Default for SchedulerTimingMetrics {
@@ -313,15 +313,15 @@ impl SchedulerTimingMetrics {
 }
 
 #[derive(Default)]
-struct IntervalSchedulerTimingMetrics {
+pub struct IntervalSchedulerTimingMetrics {
     interval: AtomicInterval,
-    metrics: SchedulerTimingMetricsInner,
+    pub metrics: SchedulerTimingMetricsInner,
 }
 
 #[derive(Default)]
-struct SlotSchedulerTimingMetrics {
+pub struct SlotSchedulerTimingMetrics {
     slot: Option<Slot>,
-    metrics: SchedulerTimingMetricsInner,
+    pub metrics: SchedulerTimingMetricsInner,
 }
 
 #[derive(Default)]
@@ -344,11 +344,11 @@ pub struct SchedulerTimingMetricsInner {
 
 impl IntervalSchedulerTimingMetrics {
     fn maybe_report_and_reset(&mut self, should_report: bool, id: &str) {
+        let name = "banking_stage_scheduler_timing";
         const REPORT_INTERVAL_MS: u64 = 1000;
         if self.interval.should_update(REPORT_INTERVAL_MS) {
             if should_report {
-                self.metrics
-                    .report("banking_stage_scheduler_timing", None, id);
+                self.metrics.report(name, None, id);
             }
             self.metrics.reset();
         }
@@ -357,11 +357,11 @@ impl IntervalSchedulerTimingMetrics {
 
 impl SlotSchedulerTimingMetrics {
     fn maybe_report_and_reset(&mut self, slot: Option<Slot>, id: &str) {
+        let name = "banking_stage_scheduler_slot_timing";
         if self.slot != slot {
             // Only report if there was an assigned slot.
             if self.slot.is_some() {
-                self.metrics
-                    .report("banking_stage_scheduler_slot_timing", self.slot, id);
+                self.metrics.report(name, self.slot, id);
             }
             self.metrics.reset();
             self.slot = slot;
@@ -401,7 +401,7 @@ impl SchedulerTimingMetricsInner {
         solana_metrics::submit(datapoint, log::Level::Info);
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.decision_time_us = Saturating(0);
         self.receive_time_us = Saturating(0);
         self.buffer_time_us = Saturating(0);
