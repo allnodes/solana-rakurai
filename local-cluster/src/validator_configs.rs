@@ -93,6 +93,16 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         target_slot_adjustment_ms: config.target_slot_adjustment_ms,
         tx_io_check: config.tx_io_check.clone(),
         oms_connector: config.oms_connector,
+
+        // Allnodes configuration
+        identity_path: config.identity_path.clone(),
+        use_mostly_confirmed_threshold: config.use_mostly_confirmed_threshold,
+        mostly_confirmed_threshold_config_path: config
+            .mostly_confirmed_threshold_config_path
+            .clone(),
+        voting_patch_flags: config.voting_patch_flags,
+        voting_patch_flags2: config.voting_patch_flags2.clone(),
+        poh_message: config.poh_message.clone(),
     }
 }
 
