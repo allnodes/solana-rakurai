@@ -1,32 +1,84 @@
+<p align="center">
+    <br /><br />
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="allnodes/images/rakurai-dark-mode.png">
+      <img alt="Rakurai-Solana Node Allnodes Edition" src="allnodes/images/rakurai-light-mode.png" style="width: 16em">
+    </picture>
+</p>
+
+# Rakurai-Solana Node with modifications from Allnodes
+
+## Modifications made by Allnodes
+
+This repository features the following enhancements to the Jito-Solana codebase:
+
+### 1. Fast snapshot distribution
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting/solana)
+
+Our infrastructure includes modifications that improve default snapshot downloading, which combined with
+ultra-high-speed channels deliver ultra-fast snapshot downloads. This dramatically reduces the initial sync time for
+new validators and enables faster deployment and recovery scenarios. The use of snapshot-finder or any other 3rd party
+download tools is no longer needed.
+
+### 2. Enhanced voting logic modifications
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting/solana)
+
+Our validator implementation includes voting modifications developed by **Zantetsu | Shinobi Systems** that enhance the
+original voting logic.
+
+These modifications work by:
+
+- Taking the next votable slot that the original codebase identifies as potentially ready for voting
+- Applying additional criteria before casting the vote
+- Providing more sophisticated voting decision-making
+
+This enhancement improves validator consensus participation through more intelligent vote timing and slot evaluation.
+
+### 3. Automatic Performance Optimization for Proof-of-History
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting/solana)
+
+Your Solana node will automatically select the fastest CPU core for Proof-of-History processing, maximizing performance
+out of the box.
+
+### 4. Hardware-optimized SHA256 patch
+
+Our validator implementation includes a third-party performance patch developed by **kagren**. It optimizes SHA256
+hashing operations using SHA-NI instructions available on modern AMD processors (Zen3, Zen4, and Zen5
+architectures). This enhancement significantly improves hashing performance for block verification and other
+cryptographic operations.
+
 # Rakurai-Solana Node Operator Guide
 
 Welcome to the official guide for setting up and running a Rakurai-Solana node. This guide is intended for node operators who want to run Rakurai's high-block-reward client and maximize their rewards through efficient transaction scheduling.
 
 The Rakurai Validator node is designed to maximize block rewards by leveraging advanced transaction scheduling techniques. This approach not only enhances Transactions Per Second (TPS) but also optimizes Compute Units (CU), leading to superior network performance. By efficiently processing high-reward transactions, node operators can significantly increase their earnings.
 - [Rakurai-Solana Node Operator Guide](#rakurai-solana-node-operator-guide)
-  - [1. Background](#1-background)
-    - [What is Rakurai-Solana?](#what-is-rakurai-solana)
-    - [High-Level Flow Architecture](#high-level-flow-architecture)
-    - [Validator Incentives and Rewards Flow](#validator-incentives-and-rewards-flow)
-    - [How Rakurai Interacts with the Solana Ecosystem](#how-rakurai-interacts-with-the-solana-ecosystem)
-  - [2. QuickStart Guide](#2-quickstart-guide)
-  - [3. Rakurai Smart Contracts (Programs)](#3-rakurai-smart-contracts-programs)
-    - [Overview of Key Programs](#overview-of-key-programs)
-    - [How the Programs Coordinate](#how-the-programs-coordinate)
-    - [Deployed Program ID](#deployed-program-id)
-  - [4. Setup and Build Rakurai Solana](#4-setup-and-build-rakurai-solana)
-    - [Prerequisites](#prerequisites)
-    - [Download and Build Rakurai-Solana](#download-and-build-rakurai-solana)
-      - [Step 1: Clone the Rakurai-Solana](#step-1-clone-the-rakurai-solana)
-      - [Step 2: Create Rakurai Activation Account (RAA)](#step-2-create-rakurai-activation-account-raa)
-      - [Step 3: Download Rakurai Scheduler Binary](#step-3-download-rakurai-scheduler-binary)
-        - [1. Sign the Rakurai Activation Account](#1-sign-the-rakurai-activation-account)
-        - [2. Get Available Versions](#2-get-available-versions)
-        - [3. Download the Scheduler Binary](#3-download-the-scheduler-binary)
-      - [Step 4: Build the Client](#step-4-build-the-client)
-      - [Step 5: Add Additional CLI Args](#step-5-add-additional-cli-args)
-        - [Mainnet Arguments](#mainnet-arguments)
-        - [Testnet Arguments](#testnet-arguments)
+    - [1. Background](#1-background)
+        - [What is Rakurai-Solana?](#what-is-rakurai-solana)
+        - [High-Level Flow Architecture](#high-level-flow-architecture)
+        - [Validator Incentives and Rewards Flow](#validator-incentives-and-rewards-flow)
+        - [How Rakurai Interacts with the Solana Ecosystem](#how-rakurai-interacts-with-the-solana-ecosystem)
+    - [2. QuickStart Guide](#2-quickstart-guide)
+    - [3. Rakurai Smart Contracts (Programs)](#3-rakurai-smart-contracts-programs)
+        - [Overview of Key Programs](#overview-of-key-programs)
+        - [How the Programs Coordinate](#how-the-programs-coordinate)
+        - [Deployed Program ID](#deployed-program-id)
+    - [4. Setup and Build Rakurai Solana](#4-setup-and-build-rakurai-solana)
+        - [Prerequisites](#prerequisites)
+        - [Download and Build Rakurai-Solana](#download-and-build-rakurai-solana)
+            - [Step 1: Clone the Rakurai-Solana](#step-1-clone-the-rakurai-solana)
+            - [Step 2: Create Rakurai Activation Account (RAA)](#step-2-create-rakurai-activation-account-raa)
+            - [Step 3: Download Rakurai Scheduler Binary](#step-3-download-rakurai-scheduler-binary)
+                - [1. Sign the Rakurai Activation Account](#1-sign-the-rakurai-activation-account)
+                - [2. Get Available Versions](#2-get-available-versions)
+                - [3. Download the Scheduler Binary](#3-download-the-scheduler-binary)
+            - [Step 4: Build the Client](#step-4-build-the-client)
+            - [Step 5: Add Additional CLI Args](#step-5-add-additional-cli-args)
+                - [Mainnet Arguments](#mainnet-arguments)
+                - [Testnet Arguments](#testnet-arguments)
 - [Verify Scheduler Binary Attestation](#verify-scheduler-binary-attestation)
 
 ---
@@ -58,7 +110,7 @@ If you are already running Rakurai and only want to upgrade your node, Following
 Note: If you are new to running Rakurai please follow the complete guide starting [here](#download-and-build-rakurai-solana)
 - Download the [scheduler binary](#step-3-download-rakurai-scheduler-binary) authenticating it with your identity-key.
 - Please make sure to update your submodules in this release using the following command:
-    `git submodule update --init`
+  `git submodule update --init`
 - Make sure to replace your old binary with new one in the correct paths.
 - [Build and run](#step-4-build-the-client) your validator incorporating the scheduler binary you just downloaded.
 - Please make sure you add --bam-url  in your startup script according to your [location](https://bam.dev/validators/#:~:text=Step%203%3A%20Choose%20Your%20Region).
@@ -84,11 +136,11 @@ Validators must first create a `rakurai_activation` account using the provided C
 
 ### Deployed Program ID
 - **Testnet**: Recommended for staging and integration testing.
-   - *rakurai_activation*: `pmQHMpnpA534JmxEdwY3ADfwDBFmy5my3CeutHM2QTt`
-   - *reward_distribution*: `A37zgM34Q43gKAxBWQ9zSbQRRhjPqGK8jM49H7aWqNVB`
+    - *rakurai_activation*: `pmQHMpnpA534JmxEdwY3ADfwDBFmy5my3CeutHM2QTt`
+    - *reward_distribution*: `A37zgM34Q43gKAxBWQ9zSbQRRhjPqGK8jM49H7aWqNVB`
 - **Mainnet**: Production environment
-   - *rakurai_activation*: `rAKACC6Qw8HYa87ntGPRbfYEMnK2D9JVLsmZaKPpMmi`
-   - *reward_distribution*: `RAkd1EJg45QQHeuXy7JEWBhdNvsd64Z5PbZJWQT96iB`
+    - *rakurai_activation*: `rAKACC6Qw8HYa87ntGPRbfYEMnK2D9JVLsmZaKPpMmi`
+    - *reward_distribution*: `RAkd1EJg45QQHeuXy7JEWBhdNvsd64Z5PbZJWQT96iB`
 
 ---
 
@@ -112,15 +164,15 @@ Additionally:
 #### Step 1: Clone the Rakurai-Solana
 Clone the latest Rakurai-Solana release with submodules:
 ```bash
-git clone https://github.com/rakurai-io/rakurai-validator.git --recurse-submodules -b <version>-rakurai 
-cd ./rakurai-validator
-git checkout release/<version>-rakurai
+git clone https://github.com/allnodes/solana-rakurai.git --recurse-submodules -b allnodes/<version>-rakurai 
+cd ./solana-rakurai
+git checkout allnodes/<version>-rakurai
 
           OR
 
 # Steps if you have the repo cloned already
 git fetch
-git checkout release/<version>-rakurai
+git checkout allnodes/<version>-rakurai
 # If you are on a previous branch where rakurai_scheduler was addeded as a submodule then run the following command before updating the submodules
 git rm --cached core/src/banking_stage/rakurai_scheduler
 git submodule update --init --recursive
@@ -134,9 +186,9 @@ echo "export PATH=\"$(pwd)/rakurai_programs/release/downloads:\$PATH\"" >> ~/.ba
 #### Step 2: Create Rakurai Activation Account (RAA)
 Use the CLI to initialize your validator's [activation account](#overview-of-key-programs). The following command will return a Pubkey (`RAKURAI_ACTIVATION_ACCOUNT_PUBKEY`), which will be used in the [next step](#step-2-download-scheduler-binary)
 
-> **Note**: 
- - If you already have created rakurai activation account then run `rakurai-activation -p <PROGRAM_ID> show -i <IDENTITY_PUBKEY> -um` to get your <RAKURAI_ACTIVATION_ACCOUNT_PUBKEY>
- - You must create a separate RAA for **each cluster** you participate in (e.g., **testnet**, **mainnet-beta**). Each cluster has its own Rakurai activation program.
+> **Note**:
+- If you already have created rakurai activation account then run `rakurai-activation -p <PROGRAM_ID> show -i <IDENTITY_PUBKEY> -um` to get your <RAKURAI_ACTIVATION_ACCOUNT_PUBKEY>
+- You must create a separate RAA for **each cluster** you participate in (e.g., **testnet**, **mainnet-beta**). Each cluster has its own Rakurai activation program.
 
 ```bash
 rakurai-activation -p <PROGRAM_ID> init \
@@ -281,15 +333,80 @@ There is another **optional** argument available to adjust the block times withi
  --target-slot-adjustment-ms <TARGET_SLOT_ADJUSTMENT_MS>
 ```
 
-  - [**Agave Validator arguments**](https://docs.anza.xyz/operations/setup-a-validator#create-a-validator-startup-script)  
-  - [**Jito-Solana arguments**](https://jito-foundation.gitbook.io/mev/jito-solana/command-line-arguments)  
+- [**Agave Validator arguments**](https://docs.anza.xyz/operations/setup-a-validator#create-a-validator-startup-script)
+- [**Jito-Solana arguments**](https://jito-foundation.gitbook.io/mev/jito-solana/command-line-arguments)
 
-*Important*: 
- - If you set `--rewards-merkle-root-authority` to `H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`, Rakurai will automatically distribute rewards to your stakers using the reward distribution program. 
- - If you set it to any other address, you will need to run the claim workflow manually.
+*Important*:
+- If you set `--rewards-merkle-root-authority` to `H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`, Rakurai will automatically distribute rewards to your stakers using the reward distribution program.
+- If you set it to any other address, you will need to run the claim workflow manually.
 
 # Verify Scheduler Binary Attestation
 
 The Rakurai scheduler binary comes with [GitHub artifact attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations), providing cryptographic proof of its build provenance and integrity. You can validate the scheduler binary by following the detailed instructions in the [Attestation Guide](./VERIFY-BINARY-ATTESTATION.md).
 
 ---
+
+# Voting mod configuration
+
+Voting mod (also known as "mostly confirmed threshold" voting patch) is enabled by default and comes with a predefined
+configuration which should work for most users. If you wish to use a custom configuration:
+
+1. create a configuration file (default filename is `mostly_confirmed_threshold` located in the current directory from
+   where you run the validator). Values in this example are defaults, their meanings will be explained in the next
+   section:
+
+```bash
+echo '0.45 4 0 24' > ./mostly_confirmed_threshold
+```
+
+2. optionally, you can provide a different filename and/or path for the config file using the
+   `--mostly-confirmed-threshold-config <path/to/config/file>` argument.
+
+> In order to disable the voting mod, you need to add the `--disable-mostly-confirmed-threshold` flag to the validator
+command.
+
+## Mostly confirmed threshold configuration file format:
+
+The `mostly_confirmed_threshold` file contains a simple whitespace-separated list of four values:
+
+```
+a b c d
+```
+
+### Parameters
+
+#### *a* (float) - vote weight threshold
+The minimum vote weight threshold required before voting on a slot. Slots that haven't achieved this vote weight will
+not be voted on, except for:
+
+- Slots within the "vote ahead of threshold" region
+- When the escape hatch distance has been reached
+
+#### *b* (integer) - vote ahead of threshold
+The number of slots ahead of the threshold slot to vote on, regardless of vote weight. This parameter reduces vote
+latency by allowing voting on recent slots even if they haven't met the threshold.
+
+#### *c* (integer) - skip recovery mode
+Controls the stake-weighted vote percentage required on a slot after skips have occurred. Must be one of:
+
+- `0` - No restriction
+- `1` - Slot after a skip must have `mostly_confirmed_threshold` before voting
+- `2` - Slot after a skip must be confirmed before voting
+
+#### *d* (integer) - escape hatch distance
+The maximum number of slots to wait without voting while waiting for the threshold to be met. After this many slots of non-voting, the validator will vote anyway.
+
+**Purpose**: This escape hatch prevents network deadlock by ensuring progress even when the threshold isn't being achieved. Without this mechanism, if multiple forks occur simultaneously and all have less than the threshold vote weight, validators could become stuck waiting indefinitely.
+
+### Default values
+
+When the configuration file is absent, the following default values are used:
+
+```
+0.45 4 0 24
+```
+
+- Threshold: 45% vote weight
+- Vote ahead: 4 slots
+- Skip recovery: No restriction
+- Escape hatch: 24 slots
