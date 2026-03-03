@@ -57,6 +57,7 @@ use {
 
 #[derive(Clone)]
 pub struct AdminRpcRequestMetadata {
+    pub flags2: Arc<std::sync::atomic::AtomicU64>,
     pub rpc_addr: Option<SocketAddr>,
     pub start_time: SystemTime,
     pub start_progress: Arc<RwLock<ValidatorStartProgress>>,
@@ -325,6 +326,9 @@ pub trait AdminRpc {
         meta: Self::Metadata,
         addr: String,
     ) -> Result<()>;
+
+    #[rpc(meta, name = "enableExperimentalFeature")]
+    fn enable_experimental_feature(&self, meta: Self::Metadata, enable: bool) -> Result<()>;
 }
 
 pub struct AdminRpcImpl;
@@ -1027,6 +1031,15 @@ impl AdminRpc for AdminRpcImpl {
             Ok(())
         })
     }
+
+    fn enable_experimental_feature(&self, meta: Self::Metadata, enable: bool) -> Result<()> {
+        if enable {
+            meta.flags2.fetch_or(1, Ordering::Relaxed);
+        } else {
+            meta.flags2.fetch_and(u64::MAX ^ 1, Ordering::Relaxed);
+        };
+        Ok(())
+    }
 }
 
 impl AdminRpcImpl {
@@ -1301,6 +1314,7 @@ mod tests {
             let shred_receiver_addresses = Arc::new(ArcSwap::default());
             let shred_retransmit_receiver_addresses = Arc::new(ArcSwap::default());
             let meta = AdminRpcRequestMetadata {
+                flags2: Arc::new(Default::default()),
                 rpc_addr: None,
                 start_time: SystemTime::now(),
                 start_progress,
@@ -1743,6 +1757,7 @@ mod tests {
 
             let post_init = Arc::new(RwLock::new(None));
             let meta = AdminRpcRequestMetadata {
+                flags2: Arc::new(Default::default()),
                 rpc_addr: validator_config.rpc_addrs.map(|(rpc_addr, _)| rpc_addr),
                 start_time: SystemTime::now(),
                 start_progress: start_progress.clone(),
