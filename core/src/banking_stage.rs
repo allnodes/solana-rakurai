@@ -1,5 +1,8 @@
 //! The `banking_stage` processes Transaction messages. It is intended to be used
 //! to construct a software pipeline.
+use arc_swap::ArcSwap;
+use borsh::{BorshDeserialize, BorshSerialize};
+use solana_metrics::metrics::warning_log;
 
 use crate::banking_stage::{
     house_keeper::TxOutputStatus, reward_distributor::RewardDistributionConfig,
@@ -139,12 +142,38 @@ pub type SharedDecision = (Arc<RwLock<DecisionState>>, Arc<AtomicBool>);
 pub mod house_keeper;
 pub mod reward_distributor;
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    strum_macros::EnumCount,
+    strum_macros::EnumIter,
+    strum_macros::EnumString,
+    strum_macros::VariantNames,
+    strum_macros::IntoStaticStr,
+    strum_macros::Display,
+)]
 #[repr(C)]
-#[serde(rename_all = "camelCase")]
+#[strum(serialize_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub enum RakuraiMode {
     Mode1,
+    #[default]
     Mode2,
+}
+
+impl RakuraiMode {
+    pub const fn cli_names() -> &'static [&'static str] {
+        <Self as strum::VariantNames>::VARIANTS
+    }
+
+    pub fn cli_message() -> &'static str {
+        "Select the Rakurai scheduling mode"
+    }
 }
 
 #[derive(
@@ -196,15 +225,6 @@ pub struct RakuraiConfig {
     pub rs_cfg_nm: u64,
 }
 
-fn warning_log(msg: String) {
-    let name: &'static str = "rakurai_warning";
-    let datapoint = create_datapoint!(
-        @point name,
-        ("rakurai_scheduler_spawn_aborted_log", msg, String),
-    );
-    solana_metrics::submit(datapoint, log::Level::Warn);
-}
-
 #[allow(dead_code)]
 fn dump_to_file(msg: String) {
     warning_log(msg.clone());
@@ -226,6 +246,35 @@ fn install_panic_warning_hook_once() {
         }));
     });
 }
+
+#[derive(BorshDeserialize, BorshSerialize, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PostPackConfirmation {
+    pub url: String,
+    pub uuid: String,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Clone, Debug, Eq, PartialEq, Default)]
+pub struct PostPackConfirmationConfig {
+    pub entries: Vec<PostPackConfirmation>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostPackConfirmationConfigStatus {
+    pub admin_entries: Vec<PostPackConfirmation>,
+    pub onchain_entries: Vec<PostPackConfirmation>,
+    pub blocklisted_uuids: Vec<String>,
+    pub blocklisted_entries: Vec<PostPackConfirmation>,
+    pub active_entries: Vec<PostPackConfirmation>,
+}
+
+/// Live postpack-confirmation status maintained by the rakurai scheduler.
+pub type PostPackConfirmationActiveEntries = Arc<ArcSwap<PostPackConfirmationConfigStatus>>;
+
+pub type PostPackConfirmationUuidBlocklist = Arc<ArcSwap<Vec<String>>>;
+
+/// Signatures already published via scheduler updates or bundle stage.
+pub type PostPackConfirmationSignatures =
+    Arc<RwLock<HashMap<Signature, solana_blake3_hasher::Hash>>>;
 
 #[cfg(feature = "build_validator")]
 unsafe extern "C" {
@@ -267,6 +316,11 @@ unsafe extern "C" {
         nonce_packet_receiver: Receiver<Signature>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         scheduling_strategy: Arc<SchedlingStrategy>,
+        cluster_info: Option<Arc<ClusterInfo>>,
+        postpack_confirmation_config: Arc<RwLock<PostPackConfirmationConfig>>,
+        postpack_confirmation_active_entries: PostPackConfirmationActiveEntries,
+        post_pack_confirmation_uuid_blocklist: PostPackConfirmationUuidBlocklist,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
     ) -> JoinHandle<()>;
 }
 
@@ -595,6 +649,10 @@ pub struct BankingStage {
     scheduling_strategy: SchedlingStrategy,
     nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
     nonce_packet_receiver: Receiver<Signature>,
+    postpack_confirmation_config: Arc<RwLock<PostPackConfirmationConfig>>,
+    postpack_confirmation_active_entries: PostPackConfirmationActiveEntries,
+    post_pack_confirmation_uuid_blocklist: PostPackConfirmationUuidBlocklist,
+    scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
 }
 
 impl BankingStage {
@@ -631,6 +689,10 @@ impl BankingStage {
         scheduling_strategy: Option<SchedlingStrategy>,
         nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_receiver: Receiver<Signature>,
+        postpack_confirmation_config: Arc<RwLock<PostPackConfirmationConfig>>,
+        postpack_confirmation_active_entries: PostPackConfirmationActiveEntries,
+        post_pack_confirmation_uuid_blocklist: PostPackConfirmationUuidBlocklist,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
     ) -> BankingStageHandle {
         let committer = Committer::new(
             transaction_status_sender,
@@ -644,9 +706,11 @@ impl BankingStage {
 
         let cluster_info = to_arc_cluster_info(cluster_info);
 
+        let worker_exit_signal = Arc::new(AtomicBool::new(false));
+
         let manager = BankingStage {
             banking_shutdown_signal: banking_shutdown_signal.clone(),
-            worker_exit_signal: Arc::new(AtomicBool::new(false)),
+            worker_exit_signal,
             banking_control_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -674,6 +738,10 @@ impl BankingStage {
             scheduling_strategy: scheduling_strategy.unwrap_or_default(),
             nonce_packets,
             nonce_packet_receiver,
+            postpack_confirmation_config,
+            postpack_confirmation_active_entries,
+            post_pack_confirmation_uuid_blocklist,
+            scheduler_postpack_conf_signatures,
         };
         install_panic_warning_hook_once();
 
@@ -952,6 +1020,11 @@ impl BankingStage {
                     self.nonce_packet_receiver.clone(),
                     self.poh_recorder.clone(),
                     scheduling_strategy.clone(),
+                    self.cluster_info.clone(),
+                    self.postpack_confirmation_config.clone(),
+                    self.postpack_confirmation_active_entries.clone(),
+                    self.post_pack_confirmation_uuid_blocklist.clone(),
+                    self.scheduler_postpack_conf_signatures.clone(),
                 );
                 threads.push(
                     Builder::new()

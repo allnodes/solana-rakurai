@@ -897,10 +897,10 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
         .arg(
             Arg::with_name("secondary_block_engines_urls")
                 .long("secondary-block-engines-urls")
-                .value_name("HOST:PORT")
+                .value_name("URL,UUID")
                 .help(
-                    "Specify extra block engines urls to receive bundles from. \
-                    Comma separated urls, may be specified multiple times.",
+                    "Specify extra block engine entries to receive bundles from. \
+                    Each value must be url,uuid. May be specified multiple times.",
                 )
                 .takes_value(true)
                 .multiple(true),

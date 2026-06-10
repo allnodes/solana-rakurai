@@ -186,7 +186,10 @@ impl Tpu {
         cancel: CancellationToken,
         votor_event_sender: VotorEventSender,
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
-        secondary_block_engine_urls: Arc<ArcSwap<Vec<String>>>,
+        secondary_block_engine_entries: Arc<
+            ArcSwap<Vec<crate::proxy::block_engine_stage::BlockEngineEntry>>,
+        >,
+        block_engine_uuid_blocklist: Arc<ArcSwap<Vec<String>>>,
         relayer_config: Arc<ArcSwap<RelayerConfig>>,
         tip_manager_config: TipManagerConfig,
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
@@ -201,6 +204,9 @@ impl Tpu {
         client_mode: Arc<Mutex<ClientMode>>,
         reset_rakurai: Arc<AtomicBool>,
         scheduling_strategy: Option<crate::banking_stage::SchedlingStrategy>,
+        postpack_confirmation_config: Arc<RwLock<crate::banking_stage::PostPackConfirmationConfig>>,
+        postpack_confirmation_active_entries: crate::banking_stage::PostPackConfirmationActiveEntries,
+        post_pack_confirmation_uuid_blocklist: crate::banking_stage::PostPackConfirmationUuidBlocklist,
     ) -> Self {
         let TpuSockets {
             vote: tpu_vote_sockets,
@@ -380,8 +386,9 @@ impl Tpu {
         let bam_enabled = Arc::new(AtomicU8::new(BamConnectionState::Disconnected as u8));
 
         let block_engine_stage = BlockEngineStage::new(
-            block_engine_config,
-            secondary_block_engine_urls,
+            block_engine_config.clone(),
+            secondary_block_engine_entries,
+            block_engine_uuid_blocklist,
             bank_forks.clone(),
             unverified_bundle_sender,
             cluster_info.clone(),
@@ -470,6 +477,7 @@ impl Tpu {
         blacklisted_accounts.insert(tip_manager.tip_payment_program_id());
         let nonce_packets = Arc::new(RwLock::new(HashMap::new()));
         let (nonce_packet_sender, nonce_packet_receiver) = unbounded();
+        let scheduler_postpack_conf_signatures = Arc::new(RwLock::new(HashMap::new()));
 
         let banking_stage = BankingStage::new_num_threads(
             block_production_method,
@@ -509,6 +517,10 @@ impl Tpu {
             scheduling_strategy,
             nonce_packets.clone(),
             nonce_packet_receiver,
+            postpack_confirmation_config,
+            postpack_confirmation_active_entries,
+            post_pack_confirmation_uuid_blocklist,
+            scheduler_postpack_conf_signatures.clone(),
         );
 
         // House keeper
@@ -556,6 +568,8 @@ impl Tpu {
             blacklisted_accounts,
             nonce_packets,
             nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
         );
 
         let bam_manager = BamManager::new(

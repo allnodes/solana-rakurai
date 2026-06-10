@@ -13,8 +13,8 @@ use {
         bam_dependencies::{BamConnectionState, BamDependencies},
         banking_simulation::DummyClusterInfo,
         banking_stage::{
-            BankingStage, DecisionState, RakuraiConfig, RakuraiMode, SchedlingStrategy,
-            reward_distributor::RewardDistributionConfig,
+            BankingStage, DecisionState, PostPackConfirmationConfig, RakuraiConfig, RakuraiMode,
+            SchedlingStrategy, reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
             update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
@@ -261,6 +261,14 @@ fn main() {
         Some(SchedlingStrategy::Strategy1),
         nonce_packets,
         nonce_packet_receiver,
+        Arc::new(RwLock::new(PostPackConfirmationConfig {
+            entries: Vec::new(),
+        })),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            solana_core::banking_stage::PostPackConfirmationConfigStatus::default(),
+        )),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<String>::new())),
+        Arc::new(RwLock::new(HashMap::new())),
     );
 
     let bank_setting_thread = {

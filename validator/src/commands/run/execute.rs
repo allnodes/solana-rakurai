@@ -38,13 +38,16 @@ use {
     solana_clock::{DEFAULT_SLOTS_PER_EPOCH, Slot},
     solana_core::{
         banking_stage::{
-            RakuraiConfig, RakuraiMode, SchedlingStrategy,
+            PostPackConfirmationConfig, RakuraiConfig, RakuraiMode, SchedlingStrategy,
             reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         banking_trace::DISABLED_BAKING_TRACE_DIR,
         consensus::tower_storage,
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::{
+            block_engine_stage::{BlockEngineConfig, parse_block_engine_entry},
+            relayer_stage::RelayerConfig,
+        },
         repair::repair_handler::RepairHandlerType,
         resource_limits,
         snapshot_packager_service::SnapshotPackagerService,
@@ -816,13 +819,16 @@ pub fn execute(
         trust_packets: matches.is_present("trust_block_engine_packets"),
     }));
 
-    let secondary_block_engine_urls = Arc::new(ArcSwap::from_pointee(
+    let secondary_block_engine_entries = Arc::new(ArcSwap::from_pointee(
         matches
             .values_of("secondary_block_engines_urls")
             .unwrap_or_default()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
+            .map(parse_block_engine_entry)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("invalid secondary block engine entry: {err}"))?,
     ));
+
+    let block_engine_uuid_blocklist = Arc::new(ArcSwap::from_pointee(Vec::<String>::new()));
 
     let bam_url = Arc::new(ArcSwap::from_pointee(
         crate::commands::bam::extract_bam_url(matches)?,
@@ -909,8 +915,12 @@ pub fn execute(
         // default to 0 if not specified
         40
     };
+
+    let rakurai_mode = value_t_or_exit!(matches, "rakurai_scheduling_mode", RakuraiMode);
+    info!("Rakurai scheduling mode: {rakurai_mode}");
+
     let rakurai_config = Arc::new(RwLock::new(RakuraiConfig {
-        rs_mode: RakuraiMode::Mode2,
+        rs_mode: rakurai_mode,
         rs_cfg_d1: rs_cfg_d1,
         rs_cfg_ct1: 54,
         rs_cfg_nd1: 30,
@@ -918,13 +928,21 @@ pub fn execute(
         rs_cfg_ft1: 120,
         rs_cfg_tf1: 1.129,
         rs_cfg_ntft: 500,
-        rs_cfg_nm: 1,
+        rs_cfg_nm: 0,
     }));
     if let Ok(rakurai_config_read) = rakurai_config.read() {
         info!("Rakurai config:{:?}", rakurai_config_read);
     }
 
-    let scheduling_strategy = value_t_or_exit!(matches, "rakurai_scheduling_strategy", SchedlingStrategy);
+    let postpack_confirmation_config = Arc::new(RwLock::new(PostPackConfirmationConfig::default()));
+    let postpack_confirmation_active_entries = Arc::new(ArcSwap::from_pointee(
+        solana_core::banking_stage::PostPackConfirmationConfigStatus::default(),
+    ));
+    let post_pack_confirmation_uuid_blocklist =
+        Arc::new(ArcSwap::from_pointee(Vec::<String>::new()));
+
+    let scheduling_strategy =
+        value_t_or_exit!(matches, "rakurai_scheduling_strategy", SchedlingStrategy);
     info!("Rakurai scheduling strategy: {scheduling_strategy}");
 
     let target_slot_adjustment_ms: u64 =
@@ -1112,9 +1130,13 @@ pub fn execute(
         tx_io_check,
         oms_connector,
         client_mode,
-        secondary_block_engine_urls,
+        secondary_block_engine_entries,
+        block_engine_uuid_blocklist,
         reset_rakurai: Arc::new(AtomicBool::new(false)),
         scheduling_strategy: Some(scheduling_strategy),
+        postpack_confirmation_config: postpack_confirmation_config.clone(),
+        postpack_confirmation_active_entries: postpack_confirmation_active_entries.clone(),
+        post_pack_confirmation_uuid_blocklist: post_pack_confirmation_uuid_blocklist.clone(),
     };
     validator_config
         .block_production_method
@@ -1181,6 +1203,13 @@ pub fn execute(
             client_mode: validator_config.client_mode.clone(),
             rakurai_config: validator_config.rakurai_config.clone(),
             reset_rakurai: validator_config.reset_rakurai.clone(),
+            postpack_confirmation_config: validator_config.postpack_confirmation_config.clone(),
+            postpack_confirmation_active_entries: validator_config
+                .postpack_confirmation_active_entries
+                .clone(),
+            post_pack_confirmation_uuid_blocklist: validator_config
+                .post_pack_confirmation_uuid_blocklist
+                .clone(),
         },
     );
 

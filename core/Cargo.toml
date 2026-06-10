@@ -112,6 +112,8 @@ solana-accounts-db = { workspace = true }
 solana-address-lookup-table-interface = { workspace = true }
 solana-bincode = { workspace = true }
 solana-bls-signatures = { workspace = true }
+solana-blake3-hasher = {workspace = true}
+solana-bloom = { workspace = true }
 solana-builtins-default-costs = { workspace = true }
 solana-bundle = { workspace = true }
 solana-client = { workspace = true }

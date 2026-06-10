@@ -1352,6 +1352,15 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help(solana_core::banking_stage::SchedlingStrategy::cli_message()),
     )
     .arg(
+        Arg::with_name("rakurai_scheduling_mode")
+            .long("rakurai-scheduling-mode")
+            .value_name("RAKURAI_SCHEDULING_MODE")
+            .takes_value(true)
+            .possible_values(solana_core::banking_stage::RakuraiMode::cli_names())
+            .default_value(solana_core::banking_stage::RakuraiMode::default().into())
+            .help(solana_core::banking_stage::RakuraiMode::cli_message()),
+    )
+    .arg(
         Arg::with_name("target_slot_adjustment_ms")
             .long("target-slot-adjustment-ms")
             .value_name("TARGET_SLOT_ADJUSTMENT_MS")
@@ -1459,10 +1468,10 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
     .arg(
         Arg::with_name("secondary_block_engines_urls")
             .long("secondary-block-engines-urls")
-            .value_name("HOST:PORT")
+            .value_name("URL,UUID")
             .help(
-                "Specify extra block engines urls to receive bundles from. \
-                Comma separated urls, May be specified multiple times.",
+                "Specify extra block engine entries to receive bundles from. \
+                Each value must be url,uuid. May be specified multiple times.",
             )
             .takes_value(true)
             .multiple(true),

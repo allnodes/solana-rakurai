@@ -34,9 +34,10 @@ use {
     solana_perf::packet::{BytesPacket, PacketBatch},
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
+    serde::{Deserialize, Serialize},
     solana_signer::Signer,
     std::{
-        collections::{hash_map::Entry, HashMap},
+        collections::{HashMap, HashSet, hash_map::Entry},
         net::{SocketAddr, ToSocketAddrs},
         ops::AddAssign,
         str::FromStr,
@@ -65,15 +66,33 @@ const CONNECTION_BACKOFF_S: u64 = 5;
 /// On-chain block engine config PDA (`["block_engine_config"]` + activation program).
 const BLOCK_ENGINE_CONFIG_PDA: &str = "DF31Yk3rAP6bJUiwMzy7HusQAwtAtvPx7XCQF9J9sUQR";
 
-/// 8-byte discriminator + authority (32) + bump (1) + `max_total_bytes` / `max_entries` (4).
-const BLOCK_ENGINE_DYNAMIC_FIELD_OFFSET: usize = 8 + 32 + 1 + 4;
+const BLOCK_ENGINE_DYNAMIC_FIELD_OFFSET: usize = 45;
 
-#[derive(BorshDeserialize)]
-struct BlockEngineUrls {
-    urls: Vec<String>,
+#[derive(BorshDeserialize, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEngineEntry {
+    pub url: String,
+    pub uuid: String,
 }
 
-fn load_secondary_block_engine_urls_from_bank(bank: &Bank) -> Option<Vec<String>> {
+#[derive(BorshDeserialize)]
+struct BlockEngineEntries {
+    entries: Vec<BlockEngineEntry>,
+}
+
+pub fn parse_block_engine_entry(value: &str) -> Result<BlockEngineEntry, String> {
+    let (url, uuid) = value
+        .split_once(',')
+        .ok_or_else(|| format!("expected url,uuid format, got: {value}"))?;
+    if url.is_empty() || uuid.is_empty() {
+        return Err(format!("url and uuid must be non-empty, got: {value}"));
+    }
+    Ok(BlockEngineEntry {
+        url: url.to_string(),
+        uuid: uuid.to_string(),
+    })
+}
+
+pub fn load_secondary_block_engine_entries_from_bank(bank: &Bank) -> Option<Vec<BlockEngineEntry>> {
     let pda = Pubkey::from_str(BLOCK_ENGINE_CONFIG_PDA).ok()?;
     let Some(account) = bank.get_account(&pda) else {
         warn!("block engine config account {pda} not found on working bank");
@@ -88,28 +107,68 @@ fn load_secondary_block_engine_urls_from_bank(bank: &Bank) -> Option<Vec<String>
         return None;
     }
     let mut slice = &data[BLOCK_ENGINE_DYNAMIC_FIELD_OFFSET..];
-    let block_engine_urls = BlockEngineUrls::deserialize(&mut slice)
+    let block_engine_entries = BlockEngineEntries::deserialize(&mut slice)
         .map_err(|err| {
-            warn!("failed to deserialize block engine urls from {pda}: {err}");
+            warn!("failed to deserialize block engine entries from {pda}: {err}");
             err
         })
         .ok()?;
-    Some(block_engine_urls.urls)
+    Some(block_engine_entries.entries)
 }
 
-fn merged_secondary_block_engine_urls(
-    admin_urls: &[String],
-    onchain_urls: Option<Vec<String>>,
-) -> Vec<String> {
-    let mut merged = admin_urls.to_vec();
-    if let Some(onchain_urls) = onchain_urls {
-        for url in onchain_urls {
-            if !merged.contains(&url) {
-                merged.push(url);
+pub fn merged_secondary_block_engine_entries(
+    admin_entries: &[BlockEngineEntry],
+    onchain_entries: Option<Vec<BlockEngineEntry>>,
+    blocklisted_uuids: &[String],
+) -> Vec<BlockEngineEntry> {
+    let blocklist: HashSet<&str> = blocklisted_uuids.iter().map(String::as_str).collect();
+    let mut merged = admin_entries
+        .iter()
+        .filter(|entry| !blocklist.contains(entry.uuid.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut merged_uuids: HashSet<String> = merged
+        .iter()
+        .map(|entry| entry.uuid.clone())
+        .collect();
+    if let Some(onchain_entries) = onchain_entries {
+        for entry in onchain_entries {
+            if !blocklist.contains(entry.uuid.as_str()) && merged_uuids.insert(entry.uuid.clone())
+            {
+                merged.push(entry);
             }
         }
     }
     merged
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEngineUrlStatus {
+    pub primary_url: String,
+    pub admin_secondary_entries: Vec<BlockEngineEntry>,
+    pub onchain_secondary_entries: Vec<BlockEngineEntry>,
+    pub blocklisted_uuids: Vec<String>,
+    pub active_secondary_entries: Vec<BlockEngineEntry>,
+}
+
+pub fn collect_block_engine_url_status(
+    block_engine_config: &BlockEngineConfig,
+    admin_secondary_entries: &[BlockEngineEntry],
+    onchain_secondary_entries: Option<Vec<BlockEngineEntry>>,
+    blocklisted_uuids: &[String],
+) -> BlockEngineUrlStatus {
+    let onchain_secondary_entries = onchain_secondary_entries.unwrap_or_default();
+    BlockEngineUrlStatus {
+        primary_url: block_engine_config.block_engine_url.clone(),
+        admin_secondary_entries: admin_secondary_entries.to_vec(),
+        onchain_secondary_entries: onchain_secondary_entries.clone(),
+        blocklisted_uuids: blocklisted_uuids.to_vec(),
+        active_secondary_entries: merged_secondary_block_engine_entries(
+            admin_secondary_entries,
+            Some(onchain_secondary_entries),
+            blocklisted_uuids,
+        ),
+    }
 }
 
 #[derive(Default)]
@@ -178,7 +237,8 @@ impl BlockEngineStage {
     const CONNECTION_BACKOFF: Duration = Duration::from_secs(CONNECTION_BACKOFF_S);
     pub fn new(
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
-        secondary_urls: Arc<ArcSwap<Vec<String>>>,
+        secondary_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+        blocklisted_uuids: Arc<ArcSwap<Vec<String>>>,
         bank_forks: Arc<RwLock<BankForks>>,
         // Channel that bundles get piped through.
         bundle_tx: Sender<Vec<PacketBundle>>,
@@ -223,7 +283,8 @@ impl BlockEngineStage {
 
             // Start secondary URL manager task
             tasks.spawn(Self::manage_secondary_urls(
-                secondary_urls.clone(),
+                secondary_entries.clone(),
+                blocklisted_uuids.clone(),
                 bank_forks,
                 cluster_info.clone(),
                 bundle_tx.clone(),
@@ -269,7 +330,8 @@ impl BlockEngineStage {
     }
 
     async fn manage_secondary_urls(
-        secondary_urls: Arc<ArcSwap<Vec<String>>>,
+        secondary_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+        blocklisted_uuids: Arc<ArcSwap<Vec<String>>>,
         bank_forks: Arc<RwLock<BankForks>>,
         cluster_info: Arc<ClusterInfo>,
         bundle_tx: Sender<Vec<PacketBundle>>,
@@ -284,59 +346,69 @@ impl BlockEngineStage {
     ) {
         const CHECK_INTERVAL: Duration = Duration::from_secs(5);
         let mut check_interval = interval(CHECK_INTERVAL);
-        let mut current_urls: Vec<String> = Vec::new();
+        let mut current_entries: Vec<BlockEngineEntry> = Vec::new();
         let mut task_set: JoinSet<()> = JoinSet::new();
 
         while !exit.load(Ordering::Relaxed) {
             tokio::select! {
                 _ = check_interval.tick() => {
-                    let admin_urls = secondary_urls.load().as_ref().clone();
-                    let onchain_urls = bank_forks.read().ok().and_then(|bank_forks_guard| {
-                        load_secondary_block_engine_urls_from_bank(&bank_forks_guard.working_bank())
+                    let admin_entries = secondary_entries.load().as_ref().clone();
+                    let blocklist = blocklisted_uuids.load().as_ref().clone();
+                    let onchain_entries = bank_forks.read().ok().and_then(|bank_forks_guard| {
+                        load_secondary_block_engine_entries_from_bank(&bank_forks_guard.working_bank())
                     });
-                    let new_urls =
-                        merged_secondary_block_engine_urls(&admin_urls, onchain_urls);
+                    let new_entries = merged_secondary_block_engine_entries(
+                        &admin_entries,
+                        onchain_entries,
+                        &blocklist,
+                    );
 
-                    if new_urls != current_urls {
-                        info!("Secondary URLs changed from {:#?} to {:#?}", current_urls, new_urls);
+                    if new_entries != current_entries {
+                        info!(
+                            "Secondary block engine entries changed from {:#?} to {:#?}",
+                            current_entries,
+                            new_entries
+                        );
 
-                        let urls_to_remove: Vec<String> = current_urls
+                        let entries_to_remove: Vec<BlockEngineEntry> = current_entries
                             .iter()
-                            .filter(|url| !new_urls.contains(url))
+                            .filter(|entry| !new_entries.contains(entry))
                             .cloned()
                             .collect();
 
-                        // Find URLs to add
-                        let urls_to_add: Vec<String> = new_urls
+                        let entries_to_add: Vec<BlockEngineEntry> = new_entries
                             .iter()
-                            .filter(|url| !current_urls.contains(url))
+                            .filter(|entry| !current_entries.contains(entry))
                             .cloned()
                             .collect();
 
-                        // Stop tasks for all current URLs
-                        for url in urls_to_remove {
+                        for entry in entries_to_remove {
                             if let Some(task_exit) = {
                                 let mut exits = secondary_task_exits.lock().unwrap();
-                                exits.remove(&url)
+                                exits.remove(&entry.uuid)
                             } {
-                                info!("Stopping task for removed URL: {}", url);
+                                info!(
+                                    "Stopping task for removed block engine entry: uuid={}, url={}",
+                                    entry.uuid, entry.url
+                                );
                                 task_exit.store(true, Ordering::Relaxed);
                             }
                         }
 
-                        // Start tasks for all new URLs
-                        for url in urls_to_add {
+                        for entry in entries_to_add {
                             let task_exit = Arc::new(AtomicBool::new(false));
 
-                            // Store the exit signal for this task
                             {
                                 let mut exits = secondary_task_exits.lock().unwrap();
-                                exits.insert(url.clone(), task_exit.clone());
+                                exits.insert(entry.uuid.clone(), task_exit.clone());
                             }
 
-                            info!("Starting task for new URL: {}", url);
+                            info!(
+                                "Starting task for new block engine entry: uuid={}, url={}",
+                                entry.uuid, entry.url
+                            );
                             task_set.spawn(Self::start(
-                                Either::Right(url.clone()),
+                                Either::Right(entry.url.clone()),
                                 cluster_info.clone(),
                                 bundle_tx.clone(),
                                 packet_tx.clone(),
@@ -349,28 +421,25 @@ impl BlockEngineStage {
                             ));
                         }
 
-                        current_urls = new_urls;
+                        current_entries = new_entries;
                     }
                 }
-                // Clean up completed tasks
                 Some(result) = task_set.join_next() => {
                     if let Err(e) = result {
-                        error!("Secondary URL task failed: {}", e);
+                        error!("Secondary block engine task failed: {}", e);
                     }
                 }
             }
         }
 
-        // Cleanup: stop all secondary tasks
         {
             let exits = secondary_task_exits.lock().unwrap();
-            for (url, task_exit) in exits.iter() {
-                info!("Stopping secondary task for URL: {}", url);
+            for (uuid, task_exit) in exits.iter() {
+                info!("Stopping secondary block engine task for uuid: {}", uuid);
                 task_exit.store(true, Ordering::Relaxed);
             }
         }
 
-        // Wait for all secondary tasks to complete
         while task_set.join_next().await.is_some() {}
     }
 
@@ -1101,7 +1170,12 @@ impl BlockEngineStage {
                         .map_err(ProxyError::from)?
                         .ok_or(ProxyError::GrpcStreamDisconnected)
                         .map_err(|err| Self::map_bam_enabled(bam_enabled, err))?;
-                    Self::handle_block_engine_bundles(resp, bundle_tx, &mut block_engine_stats)?;
+                    Self::handle_block_engine_bundles(
+                        resp,
+                        bundle_tx,
+                        &local_config.block_engine_url,
+                        &mut block_engine_stats,
+                    )?;
                 }
                 _ = metrics_and_auth_tick.tick() => {
                     block_engine_stats.report_with_url(&local_config.block_engine_url, global_config.is_left());
@@ -1170,6 +1244,7 @@ impl BlockEngineStage {
     fn handle_block_engine_bundles(
         bundles_response: block_engine::SubscribeBundlesResponse,
         bundle_sender: &Sender<Vec<PacketBundle>>,
+        block_engine_url: &str,
         block_engine_stats: &mut BlockEngineStageStats,
     ) -> crate::proxy::Result<()> {
         let mut bundle_packets = 0u64;
@@ -1187,7 +1262,11 @@ impl BlockEngineStage {
                         .collect::<Vec<BytesPacket>>(),
                 );
                 bundle_packets += packet_batch.len() as u64;
-                Some(PacketBundle::new(packet_batch, bundle.uuid))
+                Some(PacketBundle::new(
+                    packet_batch,
+                    bundle.uuid,
+                    block_engine_url.to_string(),
+                ))
             })
             .collect();
         block_engine_stats
@@ -1348,5 +1427,82 @@ impl BlockEngineStage {
             block_builder_commission: block_builder_info.commission,
         }));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(url: &str, uuid: &str) -> BlockEngineEntry {
+        BlockEngineEntry {
+            url: url.to_string(),
+            uuid: uuid.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_merged_secondary_block_engine_entries_applies_blocklist() {
+        let admin_entries = vec![
+            entry("https://admin-1", "admin-1"),
+            entry("https://blocked", "blocked"),
+        ];
+        let onchain_entries = vec![
+            entry("https://onchain-1", "onchain-1"),
+            entry("https://blocked-onchain", "blocked"),
+        ];
+        let blocklist = vec!["blocked".to_string()];
+
+        let merged = merged_secondary_block_engine_entries(
+            &admin_entries,
+            Some(onchain_entries),
+            &blocklist,
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                entry("https://admin-1", "admin-1"),
+                entry("https://onchain-1", "onchain-1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_block_engine_url_status() {
+        let config = BlockEngineConfig {
+            block_engine_url: "https://primary".to_string(),
+            ..BlockEngineConfig::default()
+        };
+        let status = collect_block_engine_url_status(
+            &config,
+            &[entry("https://admin", "admin")],
+            Some(vec![entry("https://onchain", "onchain")]),
+            &["admin".to_string()],
+        );
+
+        assert_eq!(status.primary_url, "https://primary");
+        assert_eq!(
+            status.admin_secondary_entries,
+            vec![entry("https://admin", "admin")]
+        );
+        assert_eq!(
+            status.onchain_secondary_entries,
+            vec![entry("https://onchain", "onchain")]
+        );
+        assert_eq!(status.blocklisted_uuids, vec!["admin".to_string()]);
+        assert_eq!(
+            status.active_secondary_entries,
+            vec![entry("https://onchain", "onchain")]
+        );
+    }
+
+    #[test]
+    fn test_parse_block_engine_entry() {
+        assert_eq!(
+            parse_block_engine_entry("http://example.com:15001,uuid-123").unwrap(),
+            entry("http://example.com:15001", "uuid-123")
+        );
+        assert!(parse_block_engine_entry("missing-uuid").is_err());
     }
 }

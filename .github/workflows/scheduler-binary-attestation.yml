@@ -62,7 +62,7 @@ jobs:
         - name: Generating SLSA compliant GitHub Artifact Attestation to prove build provenance and integrity of the scheduler binary
           uses: actions/attest-build-provenance@v3
           with:
-            subject-path: 'target/release/librakurai_scheduler_1_0.so'
+            subject-path: 'target/release/librakurai_scheduler.so'
 
         - name: Compressing scheduler binary for deployment
           run: |
@@ -72,7 +72,7 @@ jobs:
             SCHEDULER_VERSION="$(grep ^scheduler_version Cargo.toml | head -n1 | sed 's/scheduler_version *= *"\([^"]*\)"/\1/')"
             VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
             RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
-            mv target/release/librakurai_scheduler_1_0.so "target/release/${RENAMED_LIB}"
+            mv target/release/librakurai_scheduler.so "target/release/${RENAMED_LIB}"
             mkdir -p release
             tar -cvzf "$TAR_NAME" -C target/release "$RENAMED_LIB"
             

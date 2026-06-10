@@ -27,7 +27,8 @@ The Rakurai Validator node is designed to maximize block rewards by leveraging a
       - [Step 5: Add Additional CLI Args](#step-5-add-additional-cli-args)
         - [Mainnet Arguments](#mainnet-arguments)
         - [Testnet Arguments](#testnet-arguments)
-- [How to Run Geyser](#how-to-run-geyser)
+- [PostPack-Confirmation](#post-pack-confirmations)
+- [How to Run Geyser with Rakurai Client](#running-geyser-with-rakurai-client)
 - [Verify Scheduler Binary Attestation](#verify-scheduler-binary-attestation)
 
 ---
@@ -137,7 +138,7 @@ Use the CLI to initialize your validator's [activation account](#overview-of-key
 
 > **Note**: 
  - If you already have created rakurai activation account then run `rakurai-activation -p <PROGRAM_ID> show -i <IDENTITY_PUBKEY> -um` to get your <RAKURAI_ACTIVATION_ACCOUNT_PUBKEY>
- - You must create a separate RAA for **each cluster** you participate in (e.g., **testnet**, **mainnet-beta**). Each cluster has its own Rakurai activation program.
+  - **Rakurai Activation Account (RAA)** is uniquely tied to a **validator identity**. You must create a separate **RAA for each validator and each cluster** (e.g., **testnet**, **mainnet-beta**). since each cluster uses a different **Rakurai Activation Program** ID.
 
 ```bash
 rakurai-activation -p <PROGRAM_ID> init \
@@ -156,11 +157,16 @@ Arguments:
 Optional Argument:
 - `--block_reward_commission_bps <VALUE>`: Validator commission percentage on block rewards in basis points (i.e 100 bps = 1%). [Default Value: 10000 bps]
 
-> More CLI details are available in the Rakurai [CLI Documentation](https://github.com/rakurai-io/rakurai_programs/blob/release/v0.1.2/cli/README.md).
+> For more details, refer to the [latest release](https://github.com/rakurai-io/rakurai_programs/releases/latest) of Rakurai Activation CLI.
 
 #### Step 3: Download Rakurai Scheduler Binary
-
 Before running the scheduler, you must **authenticate** and download the correct binary for your OS and release version.
+#### ⚠️ Notes:
+  - A **Rakurai Activation Account (RAA)** is [uniquely tied](#step-2-create-rakurai-activation-account-raa) to a **validator identity**.
+  - The **scheduler binary itself is NOT tied to a validator**
+  - You can reuse the **same binary across multiple validators**
+
+Always verify the version before downloading.
 
 ---
 
@@ -220,7 +226,7 @@ curl -o rakurai-scheduler.tar.gz https://api.rakurai.io/api/v1/downloads/schedul
 > - Replace `activation_account` and `signature` with valid values.
 
 ---
-You can also download the scheduler library from [Rakurai.io](https://rakurai.io/validators#).
+
 
 #### Step 4: Build the Client
 
@@ -256,26 +262,6 @@ Modify your validator startup script by appending the following arguments:
  --reward-distribution-program-id A37zgM34Q43gKAxBWQ9zSbQRRhjPqGK8jM49H7aWqNVB
 ```
 
-You can add the following argument in your startup script to specify the validator client's mode of operation.
-It will default to `rakurai-jito` if not specified. Other available option is `bam-strict-compliance`. `rakurai-bam` is restricted until complete compatability with BAM is ensured. 
-
-```bash
- --client-mode <CLIENT_MODE>
-```
-
-You can change the client-mode through admin RPC without restarting your validator using the following command
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"setClientMode","params":["<CLIENT_MODE>"]}' | socat - UNIX-CONNECT:admin.rpc
-```
-
-You can **optionally** add the following argument to delay QUIC packets that are not coming from the Jito relayer.
-This emulates the approach used by Jito in their relayer. It will default to `200` if not specified.
-
-```bash
- --banking-packet-delay-ms <BANKING_PACKET_DELAY_MS>
-```
-
 There is another **optional** argument available to adjust the block times within the protocol limits. The default value of this argument is set to 10 which translates to 390ms block times. You can set it to a max of 50 which translates to 350ms
 
 ```bash
@@ -289,12 +275,23 @@ There is another **optional** argument available to adjust the block times withi
  - If you set `--rewards-merkle-root-authority` to `H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`, Rakurai will automatically distribute rewards to your stakers using the reward distribution program. 
  - If you set it to any other address, you will need to run the claim workflow manually.
 
-# How to Run Geyser
+# Post-pack confirmations
 
-The struct layout and padding of the **Rakurai Validator** are slightly different from the standard **Agave/Solana validator**. To run any third-party Geyser with a Rakurai client, you **must follow the steps** in **[HOW-TO-RUN-GEYSER](./HOW-TO-RUN-GEYSER.md)** and apply the necessary patches to ensure compatibility. A sample Geyser plugin binary is provided at [spark-geyser](./spark-geyser/README.md).
+Rakurai scheduler provides some updates (post-pack confirmations). As soon as a transaction gets scheduled for execution, it forwards the update to configured **post-pack confirmation endpoints** over gRPC. These updates are generated from the **point of no-return**. Consumers of this service can only see the updates just before they imminently become part of the block therefore ensuring no front-running.
+
+**What consumer will receive:** transactions as Jito Packet format [`Packet`](jito-protos/protos/packet.proto) messages (raw Solana wire bytes), streamed over `StartExpiringPacketStream`.
+
+**What you send back:** a bundle that includes the original postpacks-confirmation packet **unchanged**, plus any additional transactions (e.g. arb). The protocol mirrors the Jito relayer packet/bundle flow.
+
+Admin RPC: `setPostPackConfirmationConfig`, `getPostPackConfirmationConfig` (admin + on-chain merge status), and `setPostPackConfirmationUuidBlocklist` (block endpoint UUIDs from active connections).
+
+For the detail guide, see **[PostPack-Confirmation Guide](./HOW-TO-USE-POSTPACK-CONFIRMATION.md)**.
+
+# Running Geyser with Rakurai Client
+
+The struct layout and padding of the **Rakurai Validator** are slightly different from the standard **Agave/Solana validator**. To run any third-party Geyser with a Rakurai client, you **must follow the steps** outlined in this **[guide](./RUNNING-GEYSER-WITH-RAKURAI-CLIENT)** and apply the required patches to ensure compatibility.A sample Geyser plugin binary is provided in this directory: **[spark-geyser](./spark-geyser/README.md)**.
 
 **Note:** Running a standard Geyser without applying Rakurai-compatible patches **may crash your node or cause undefined behavior**.  
-
 
 # Verify Scheduler Binary Attestation
 

@@ -22,7 +22,10 @@ use {
         multicast_shred_check_service::{
             MulticastShredCheckService, multicast_shred_addresses_for_cluster,
         },
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::{
+            block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
+            relayer_stage::RelayerConfig,
+        },
         repair::{
             self, repair_handler::RepairHandlerType, serve_repair_service::ServeRepairService,
         },
@@ -424,7 +427,8 @@ pub struct ValidatorConfig {
     // jito configuration
     pub relayer_config: Arc<ArcSwap<RelayerConfig>>,
     pub block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
-    pub secondary_block_engine_urls: Arc<ArcSwap<Vec<String>>>,
+    pub secondary_block_engine_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+    pub block_engine_uuid_blocklist: Arc<ArcSwap<Vec<String>>>,
     /// Configured leader shred receiver addresses. This list may be empty.
     /// Auto-detected multicast may still be appended when the cluster
     /// route exists and the multicast address is not already present.
@@ -446,6 +450,11 @@ pub struct ValidatorConfig {
     pub client_mode: Arc<Mutex<ClientMode>>,
     pub reset_rakurai: Arc<AtomicBool>,
     pub scheduling_strategy: Option<crate::banking_stage::SchedlingStrategy>,
+    pub postpack_confirmation_config: Arc<RwLock<crate::banking_stage::PostPackConfirmationConfig>>,
+    pub postpack_confirmation_active_entries:
+        crate::banking_stage::PostPackConfirmationActiveEntries,
+    pub post_pack_confirmation_uuid_blocklist:
+        crate::banking_stage::PostPackConfirmationUuidBlocklist,
 }
 
 impl ValidatorConfig {
@@ -531,7 +540,8 @@ impl ValidatorConfig {
             snapshot_packager_niceness_adj: 0,
             relayer_config: Arc::new(ArcSwap::from_pointee(RelayerConfig::default())),
             block_engine_config: Arc::new(ArcSwap::from_pointee(BlockEngineConfig::default())),
-            secondary_block_engine_urls: Arc::new(ArcSwap::from_pointee(vec![])),
+            secondary_block_engine_entries: Arc::new(ArcSwap::from_pointee(vec![])),
+            block_engine_uuid_blocklist: Arc::new(ArcSwap::from_pointee(vec![])),
             shred_receiver_addresses: Arc::new(
                 ArcSwap::from_pointee(ShredReceiverAddresses::new()),
             ),
@@ -560,6 +570,17 @@ impl ValidatorConfig {
             client_mode: Arc::new(Mutex::new(ClientMode::default())),
             reset_rakurai: Arc::new(AtomicBool::new(false)),
             scheduling_strategy: None,
+            postpack_confirmation_config: Arc::new(RwLock::new(
+                crate::banking_stage::PostPackConfirmationConfig {
+                    entries: Vec::new(),
+                },
+            )),
+            postpack_confirmation_active_entries: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::banking_stage::PostPackConfirmationConfigStatus::default(),
+            )),
+            post_pack_confirmation_uuid_blocklist: Arc::new(arc_swap::ArcSwap::from_pointee(
+                Vec::new(),
+            )),
         }
     }
 
@@ -1814,7 +1835,8 @@ impl Validator {
             cancel,
             votor_event_sender.clone(),
             config.block_engine_config.clone(),
-            config.secondary_block_engine_urls.clone(),
+            config.secondary_block_engine_entries.clone(),
+            config.block_engine_uuid_blocklist.clone(),
             config.relayer_config.clone(),
             config.tip_manager_config.clone(),
             shredstream_receiver_address,
@@ -1829,6 +1851,9 @@ impl Validator {
             config.client_mode.clone(),
             config.reset_rakurai.clone(),
             config.scheduling_strategy,
+            config.postpack_confirmation_config.clone(),
+            config.postpack_confirmation_active_entries.clone(),
+            config.post_pack_confirmation_uuid_blocklist.clone(),
         );
 
         datapoint_info!(
@@ -1864,7 +1889,8 @@ impl Validator {
             blockstore: blockstore.clone(),
             votor_event_sender,
             block_engine_config: config.block_engine_config.clone(),
-            secondary_block_engine_urls: config.secondary_block_engine_urls.clone(),
+            secondary_block_engine_entries: config.secondary_block_engine_entries.clone(),
+            block_engine_uuid_blocklist: config.block_engine_uuid_blocklist.clone(),
             relayer_config: config.relayer_config.clone(),
             shred_receiver_addresses: config.shred_receiver_addresses.clone(),
             shred_retransmit_receiver_addresses: config.shred_retransmit_receiver_addresses.clone(),

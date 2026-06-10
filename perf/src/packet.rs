@@ -82,6 +82,18 @@ impl BytesPacket {
         Ok(Self { buffer, meta })
     }
 
+    /// Construct a `BytesPacket` by copying `packet_data` into a fresh `Bytes`
+    /// buffer. Does not share backing storage with the source slice.
+    pub fn from_copied_slice(packet_data: &[u8]) -> Self {
+        Self::from_copied_slice_with_meta(packet_data, Meta::default())
+    }
+
+    /// Like [`Self::from_copied_slice`], but uses the provided `Meta`.
+    pub fn from_copied_slice_with_meta(packet_data: &[u8], mut meta: Meta) -> Self {
+        meta.size = packet_data.len();
+        Self::new(Bytes::copy_from_slice(packet_data), meta)
+    }
+
     #[inline]
     pub fn data<I>(&self, index: I) -> Option<&<I as SliceIndex<[u8]>>::Output>
     where

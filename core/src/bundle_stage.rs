@@ -4,6 +4,7 @@
 use {
     crate::{
         banking_stage::{
+            PostPackConfirmationSignatures,
             committer::{CommitTransactionDetails, Committer},
             consume_worker::ConsumeWorkerMetrics,
             consumer::ProcessTransactionBatchOutput,
@@ -16,7 +17,7 @@ use {
             bundle_storage::{BundleStorage, BundleStorageEntry, BundleStorageError},
         },
         packet_bundle::VerifiedPacketBundle,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        proxy::block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig},
         tip_manager::TipManager,
     },
     ahash::HashSet,
@@ -196,8 +197,9 @@ impl BundleStageLoopMetrics {
             BundleStorageError::DuplicateNonce => {
                 self.num_bundles_dropped_duplicate_nonce += 1;
             }
-            BundleStorageError::ZeroTipAmount => {
+            BundleStorageError::ZeroTipAmount(block_engine_url) => {
                 self.num_bundles_dropped_zero_tip_amount += 1;
+                warn!("dropped bundle with zero tip amount from block engine: {block_engine_url}");
             }
         }
     }
@@ -383,6 +385,8 @@ impl BundleStage {
         blacklisted_accounts: HashSet<Pubkey>,
         nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_sender: Sender<Signature>,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
     ) -> Self {
         Self::start_bundle_thread(
             cluster_info,
@@ -401,6 +405,8 @@ impl BundleStage {
             blacklisted_accounts,
             nonce_packets,
             nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
         )
     }
 
@@ -426,6 +432,8 @@ impl BundleStage {
         blacklisted_accounts: HashSet<Pubkey>,
         nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_sender: Sender<Signature>,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
     ) -> Self {
         let committer = Committer::new(
             transaction_status_sender,
@@ -457,6 +465,8 @@ impl BundleStage {
                     cluster_info,
                     nonce_packets,
                     nonce_packet_sender,
+                    scheduler_postpack_conf_signatures,
+                    block_engine_config,
                 );
             })
             .unwrap();
@@ -478,6 +488,8 @@ impl BundleStage {
         cluster_info: Arc<ClusterInfo>,
         nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_sender: Sender<Signature>,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
     ) {
         let mut last_metrics_update = Instant::now();
         let mut bundle_storage = BundleStorage::with_capacity(2_000);
@@ -519,6 +531,8 @@ impl BundleStage {
                 &mut bundle_stage_metrics,
                 &nonce_packets,
                 &nonce_packet_sender,
+                &scheduler_postpack_conf_signatures,
+                &block_engine_config,
             ) {
                 break;
             }
@@ -548,6 +562,8 @@ impl BundleStage {
         bundle_stage_metrics: &mut BundleStageLoopMetrics,
         nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_sender: &Sender<Signature>,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        block_engine_config: &ArcSwap<BlockEngineConfig>,
     ) -> Result<(), RecvTimeoutError> {
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
@@ -572,6 +588,8 @@ impl BundleStage {
             bundle_stage_metrics,
             nonce_packets,
             nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
         );
 
         while let Ok(bundle) = bundle_receiver.try_recv() {
@@ -584,6 +602,8 @@ impl BundleStage {
                 bundle_stage_metrics,
                 nonce_packets,
                 nonce_packet_sender,
+                scheduler_postpack_conf_signatures,
+                block_engine_config,
             );
         }
 
@@ -599,6 +619,8 @@ impl BundleStage {
         bundle_stage_metrics: &mut BundleStageLoopMetrics,
         nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_sender: &Sender<Signature>,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        block_engine_config: &ArcSwap<BlockEngineConfig>,
     ) {
         let num_packets = bundle.batch().len();
 
@@ -612,6 +634,8 @@ impl BundleStage {
             blacklisted_accounts,
             nonce_packets,
             nonce_packet_sender,
+            block_engine_config,
+            scheduler_postpack_conf_signatures,
         ) {
             Ok(_) => {
                 bundle_stage_metrics.increment_newly_buffered_bundles_count(1);

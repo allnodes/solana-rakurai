@@ -523,7 +523,7 @@ impl TransactionViewReceiveAndBuffer {
 /// Perform sanitization checks and transition from data to an executable
 /// [`RuntimeTransaction`]. This additionally returns the minimum slot for
 /// ALT deactivation, if any. If no minimum slot, Slot::MAX is returned.
-pub(crate) fn translate_to_runtime_view<D: TransactionData>(
+pub fn translate_to_runtime_view<D: TransactionData>(
     data: D,
     bank: &Bank,
     transaction_account_lock_limit: usize,

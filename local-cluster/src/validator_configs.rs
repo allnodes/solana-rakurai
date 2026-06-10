@@ -86,7 +86,8 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         snapshot_packager_niceness_adj: config.snapshot_packager_niceness_adj,
         relayer_config: config.relayer_config.clone(),
         block_engine_config: config.block_engine_config.clone(),
-        secondary_block_engine_urls: config.secondary_block_engine_urls.clone(),
+        secondary_block_engine_entries: config.secondary_block_engine_entries.clone(),
+        block_engine_uuid_blocklist: config.block_engine_uuid_blocklist.clone(),
         shred_receiver_addresses: config.shred_receiver_addresses.clone(),
         shred_retransmit_receiver_addresses: config.shred_retransmit_receiver_addresses.clone(),
         multicast_receiver_address: config.multicast_receiver_address.clone(),
@@ -101,6 +102,9 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         client_mode: config.client_mode.clone(),
         reset_rakurai: config.reset_rakurai.clone(),
         scheduling_strategy: config.scheduling_strategy,
+        postpack_confirmation_config: config.postpack_confirmation_config.clone(),
+        postpack_confirmation_active_entries: config.postpack_confirmation_active_entries.clone(),
+        post_pack_confirmation_uuid_blocklist: config.post_pack_confirmation_uuid_blocklist.clone(),
     }
 }
 

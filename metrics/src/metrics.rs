@@ -88,7 +88,7 @@ struct InfluxDbMetricsWriter {
 }
 
 #[allow(dead_code)]
-fn warning_log(msg: String) {
+pub fn warning_log(msg: String) {
     let name: &'static str = "rakurai_warning";
     let datapoint = create_datapoint!(
         @point name,

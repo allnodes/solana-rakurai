@@ -20,9 +20,12 @@ use {
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
-        banking_stage::{RakuraiConfig, RakuraiMode},
+        banking_stage::{
+            PostPackConfirmationConfig, PostPackConfirmationConfigStatus, RakuraiConfig,
+            RakuraiMode,
+        },
         consensus::tower_storage::TowerStorage,
-        proxy::block_engine_stage::BlockEngineConfig,
+        proxy::block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
         tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
         validator::{
             ClientMode, Validator, ValidatorConfig, ValidatorStartProgress, ValidatorTpuConfig,
@@ -83,7 +86,7 @@ use {
         num::{NonZero, NonZeroU64},
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+        sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
         time::Duration,
     },
     tokio::time::sleep,
@@ -158,8 +161,13 @@ pub struct TestValidatorGenesis {
     pub client_mode: Arc<Mutex<ClientMode>>,
     pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
     pub reset_rakurai: Arc<AtomicBool>,
+    pub postpack_confirmation_config: Arc<RwLock<PostPackConfirmationConfig>>,
+    pub postpack_confirmation_active_entries:
+        solana_core::banking_stage::PostPackConfirmationActiveEntries,
+    pub post_pack_confirmation_uuid_blocklist:
+        solana_core::banking_stage::PostPackConfirmationUuidBlocklist,
     pub block_engine_url: String,
-    pub secondary_block_engine_urls: Vec<String>,
+    pub secondary_block_engine_entries: Vec<BlockEngineEntry>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -210,8 +218,17 @@ impl Default for TestValidatorGenesis {
                 rs_cfg_nm: 1,
             })),
             reset_rakurai: Arc::new(AtomicBool::new(false)),
+            postpack_confirmation_config: Arc::new(RwLock::new(
+                PostPackConfirmationConfig::default(),
+            )),
+            postpack_confirmation_active_entries: Arc::new(arc_swap::ArcSwap::from_pointee(
+                PostPackConfirmationConfigStatus::default(),
+            )),
+            post_pack_confirmation_uuid_blocklist: Arc::new(arc_swap::ArcSwap::from_pointee(
+                Vec::new(),
+            )),
             block_engine_url: String::default(),
-            secondary_block_engine_urls: vec![],
+            secondary_block_engine_entries: vec![],
         }
     }
 }
@@ -1188,8 +1205,8 @@ impl TestValidator {
                 disable_block_engine_autoconfig: true,
                 trust_packets: false,
             })),
-            secondary_block_engine_urls: Arc::new(ArcSwap::from_pointee(
-                config.secondary_block_engine_urls.clone(),
+            secondary_block_engine_entries: Arc::new(ArcSwap::from_pointee(
+                config.secondary_block_engine_entries.clone(),
             )),
             ..ValidatorConfig::default_for_test()
         };

@@ -2,7 +2,12 @@
 use {
     crate::{
         banking_stage::{
-            BankingStage, BankingStageHandle, DecisionState, LikeClusterInfo, RakuraiConfig, RakuraiMode, SchedlingStrategy, house_keeper::HouseKeeper, reward_distributor::RewardDistributionConfig, transaction_scheduler::scheduler_controller::SchedulerConfig, update_bank_forks_and_poh_recorder_for_new_tpu_bank
+            BankingStage, BankingStageHandle, DecisionState, LikeClusterInfo, RakuraiConfig,
+            RakuraiMode, SchedlingStrategy, house_keeper::HouseKeeper,
+            reward_distributor::RewardDistributionConfig,
+            transaction_scheduler::scheduler_controller::SchedulerConfig,
+            unified_scheduler::ensure_banking_stage_setup,
+            update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
         banking_trace::{
             BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT, BASENAME, BankingTracer, ChannelLabel, Channels,
@@ -907,6 +912,8 @@ impl BankingSimulator {
         let nonce_packets = Arc::new(RwLock::new(HashMap::new()));
         let (_nonce_packet_sender, nonce_packet_receiver) = unbounded();
 
+        let scheduler_postpack_conf_signatures = Arc::new(RwLock::new(HashMap::new()));
+
         info!("Start banking stage!...");
         let banking_stage = BankingStage::new_num_threads(
             block_production_method,
@@ -950,6 +957,16 @@ impl BankingSimulator {
             Some(SchedlingStrategy::Strategy1),
             nonce_packets,
             nonce_packet_receiver,
+            Arc::new(RwLock::new(
+                crate::banking_stage::PostPackConfirmationConfig {
+                    entries: Vec::new(),
+                },
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::banking_stage::PostPackConfirmationConfigStatus::default(),
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<String>::new())),
+            scheduler_postpack_conf_signatures,
         );
 
         // House keeper

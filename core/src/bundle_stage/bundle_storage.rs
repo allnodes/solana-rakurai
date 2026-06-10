@@ -1,6 +1,7 @@
 use {
     crate::{
         banking_stage::{
+            PostPackConfirmationSignatures,
             scheduler_messages::MaxAge,
             transaction_scheduler::{
                 receive_and_buffer::PacketHandlingError,
@@ -11,10 +12,13 @@ use {
         },
         bundle_stage::bundle_packet_deserializer::BundlePacketDeserializer,
         packet_bundle::VerifiedPacketBundle,
+        proxy::block_engine_stage::BlockEngineConfig,
     },
     ahash::HashSet,
+    arc_swap::ArcSwap,
     arrayvec::ArrayVec,
     crossbeam_channel::Sender,
+    log::info,
     min_max_heap::MinMaxHeap,
     solana_address::Address,
     solana_clock::Slot,
@@ -24,9 +28,11 @@ use {
     solana_runtime_transaction::transaction_meta::TransactionMeta,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_signature::Signature,
-    std::collections::{HashMap, VecDeque},
-    std::str::FromStr,
-    std::sync::{Arc, RwLock},
+    std::{
+        collections::{HashMap, VecDeque},
+        str::FromStr,
+        sync::{Arc, RwLock},
+    },
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -38,7 +44,7 @@ pub enum BundleStorageError {
     BundleTooLarge,
     DuplicateTransaction,
     DuplicateNonce,
-    ZeroTipAmount,
+    ZeroTipAmount(String),
 }
 
 struct BundleTransactionId {
@@ -85,8 +91,10 @@ pub fn jito_tip_accounts_map() -> HashMap<Pubkey, f64> {
         .collect()
 }
 
+#[cfg(feature = "build_validator")]
 unsafe extern "C" {
     #[allow(improper_ctypes)]
+    #[allow(unused)]
     fn fetch_bundle_tip(transaction: &RuntimeTransactionView) -> u64;
 }
 
@@ -216,6 +224,81 @@ impl BundleStorage {
         })
     }
 
+    /// Preconf hashes are sent in proto `meta.addr` as `hash.to_string()` and stored in
+    /// `packet.meta.remote_pubkey` in `proto_packet_to_packet`.
+    fn postpackconf_hash_matches_packet_remote_pubkey(
+        postpackconf_hash: &solana_blake3_hasher::Hash,
+        remote_pubkey: &Pubkey,
+    ) -> bool {
+        let matches = postpackconf_hash.as_ref() == remote_pubkey.as_ref();
+        info!(
+            "postpackconf hash comparison: postpackconf_hash={postpackconf_hash}, packet_remote_pubkey={remote_pubkey}, matches={matches}"
+        );
+        matches
+    }
+
+    /// For secondary block engine bundles whose lead transaction was already published via
+    /// scheduler updates, strip the first transaction when it succeeded on-chain (backrun).
+    fn maybe_strip_secondary_backrun_lead_transaction(
+        &mut self,
+        block_engine_url: &str,
+        primary_block_engine_url: &str,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        working_bank: &Bank,
+        first_packet_remote_pubkey: Option<Pubkey>,
+        container_ids: &mut Vec<(usize, u64, u64)>,
+    ) -> bool {
+        if block_engine_url == primary_block_engine_url || container_ids.len() < 2 {
+            return false;
+        }
+
+        let first_container_id = container_ids[0].0;
+        let Some(first_signature) = self
+            .transaction_view_state_container
+            .get_transaction(first_container_id)
+            .and_then(|tx| tx.signatures().first().copied())
+        else {
+            return false;
+        };
+
+        {
+            let Ok(seen) = scheduler_postpack_conf_signatures.read() else {
+                return false;
+            };
+            let Some(postpackconf_hash) = seen.get(&first_signature) else {
+                return false;
+            };
+            let Some(packet_remote_pubkey) = first_packet_remote_pubkey else {
+                return false;
+            };
+            if !Self::postpackconf_hash_matches_packet_remote_pubkey(
+                postpackconf_hash,
+                &packet_remote_pubkey,
+            ) {
+                return false;
+            }
+        }
+
+        if working_bank
+            .get_signature_status(&first_signature)
+            .is_some_and(|status| status.is_err())
+        {
+            return true;
+        }
+
+        let (removed_id, _, _) = container_ids.remove(0);
+        self.transaction_view_state_container
+            .remove_by_id(removed_id);
+
+        info!(
+            "stripped lead transaction {first_signature} from secondary block engine bundle \
+             ({block_engine_url}); remaining txns: {}",
+            container_ids.len()
+        );
+
+        true
+    }
+
     pub fn insert_bundle(
         &mut self,
         bundle: VerifiedPacketBundle,
@@ -224,7 +307,10 @@ impl BundleStorage {
         blacklisted_accounts: &HashSet<Pubkey>,
         nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
         nonce_packet_sender: &Sender<Signature>,
+        block_engine_config: &ArcSwap<BlockEngineConfig>,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
     ) -> Result<(), BundleStorageError> {
+        let block_engine_url = bundle.block_engine_url().to_string();
         let batch = bundle.take();
 
         // Packet checks
@@ -251,6 +337,8 @@ impl BundleStorage {
         {
             return Err(BundleStorageError::ContainerFull);
         }
+
+        let first_packet_remote_pubkey = batch.get(0).unwrap().meta().remote_pubkey;
 
         let mut container_ids: Vec<(usize, u64, u64)> = Vec::with_capacity(batch.len());
         let mut maybe_error = Ok(());
@@ -296,7 +384,16 @@ impl BundleStorage {
                     .transaction_view_state_container
                     .get_mut_transaction_state(container_id)
                     .unwrap();
-                let tip_amount = unsafe { fetch_bundle_tip(transaction_state.transaction()) };
+                let tip_amount;
+                #[cfg(feature = "build_validator")]
+                unsafe {
+                    tip_amount = fetch_bundle_tip(transaction_state.transaction())
+                };
+                #[cfg(not(feature = "build_validator"))]
+                {
+                    tip_amount = 0;
+                }
+
                 let cus = transaction_state.cost();
                 total_bundle_tip_amount += tip_amount;
 
@@ -340,14 +437,24 @@ impl BundleStorage {
             }
             return Err(BundleStorageError::DuplicateTransaction);
         }
-        total_bundle_tip_amount = total_bundle_tip_amount.saturating_mul(1_000_000);
+
         if total_bundle_tip_amount == 0 {
             for (container_id, _, _) in container_ids.iter() {
                 self.transaction_view_state_container
                     .remove_by_id(*container_id);
             }
-            return Err(BundleStorageError::ZeroTipAmount);
+            return Err(BundleStorageError::ZeroTipAmount(block_engine_url));
         }
+
+        let primary_block_engine_url = block_engine_config.load().block_engine_url.clone();
+        let postpackconf_hash_matched = self.maybe_strip_secondary_backrun_lead_transaction(
+            &block_engine_url,
+            &primary_block_engine_url,
+            scheduler_postpack_conf_signatures,
+            working_bank,
+            first_packet_remote_pubkey,
+            &mut container_ids,
+        );
 
         let mut total_rewards = 0;
         let mut total_cus = 0;
@@ -357,9 +464,16 @@ impl BundleStorage {
             total_cus += cus;
         }
 
+        if postpackconf_hash_matched {
+            total_bundle_tip_amount = total_bundle_tip_amount
+                .saturating_mul(120)
+                .saturating_div(100);
+        }
         total_rewards = total_rewards + total_bundle_tip_amount;
 
-        let bundle_priority = total_rewards.saturating_div(total_cus.saturating_add(1));
+        let bundle_priority = total_rewards
+            .saturating_mul(1_000_000)
+            .saturating_div(total_cus.saturating_add(1));
 
         if let (Some(nonce), Some(blockhash)) = (nonce, blockhash) {
             if let Ok(nonce_packets) = nonce_packets.read() {
