@@ -6,7 +6,7 @@ use {
             block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
             relayer_stage::RelayerConfig,
         },
-        repair::{outstanding_requests::OutstandingRequests, serve_repair::ShredRepairType},
+        repair::repair_service::OutstandingShredRepairs,
     },
     agave_votor::event::VotorEventSender,
     arc_swap::ArcSwap,

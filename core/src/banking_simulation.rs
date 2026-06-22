@@ -6,7 +6,6 @@ use {
             RakuraiMode, SchedlingStrategy, house_keeper::HouseKeeper,
             reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
-            unified_scheduler::ensure_banking_stage_setup,
             update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
         banking_trace::{

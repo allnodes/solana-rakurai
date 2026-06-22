@@ -452,7 +452,7 @@ impl BundleStorage {
             &primary_block_engine_url,
             scheduler_postpack_conf_signatures,
             working_bank,
-            first_packet_remote_pubkey,
+            Some(first_packet_remote_pubkey),
             &mut container_ids,
         );
 
