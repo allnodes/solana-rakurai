@@ -10,6 +10,9 @@ on:
         description: "Branch to run workflow from"
         required: true
 
+permissions:
+  contents: write
+
 jobs:
   push-doc:
     if: >
@@ -24,33 +27,98 @@ jobs:
         uses: actions/checkout@v3
         with:
           ref: ${{ github.event.inputs.branch || github.ref }}
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      # 2. Clone central docs repo
+      - name: Verify rakurai_programs submodule
+        run: test -f rakurai_programs/README.md
+
+      - name: Verify jito-protos submodule
+        run: |
+          test -f jito-protos/protos/packet.proto
+          test -f jito-protos/protos/block_engine.proto
+
+      # Overlay submodule program docs under rakurai_docs/rakurai_programs/ only.
+      # Do NOT delete rakurai_docs/validators or rakurai_docs/integrators.
+      - name: Sync program docs from submodule
+        run: |
+          mkdir -p rakurai_docs/rakurai_programs/programs/rakurai_activation/idl
+          mkdir -p rakurai_docs/rakurai_programs/programs/reward_distribution/idl
+          mkdir -p rakurai_docs/rakurai_programs/programs/rakurai_tip_manager/idl
+          mkdir -p rakurai_docs/rakurai_programs/cli
+
+          cp rakurai_programs/README.md rakurai_docs/rakurai_programs/README.md
+          cp rakurai_programs/programs/rakurai_activation/README.md \
+            rakurai_docs/rakurai_programs/programs/rakurai_activation/README.md
+          cp rakurai_programs/programs/reward_distribution/README.md \
+            rakurai_docs/rakurai_programs/programs/reward_distribution/README.md
+          cp rakurai_programs/programs/rakurai_tip_manager/README.md \
+            rakurai_docs/rakurai_programs/programs/rakurai_tip_manager/README.md
+          cp rakurai_programs/cli/README.md rakurai_docs/rakurai_programs/cli/README.md
+
+          cp rakurai_programs/programs/rakurai_activation/idl/*.json \
+            rakurai_docs/rakurai_programs/programs/rakurai_activation/idl/ 2>/dev/null || true
+          cp rakurai_programs/programs/reward_distribution/idl/*.json \
+            rakurai_docs/rakurai_programs/programs/reward_distribution/idl/ 2>/dev/null || true
+          cp rakurai_programs/programs/rakurai_tip_manager/idl/*.json \
+            rakurai_docs/rakurai_programs/programs/rakurai_tip_manager/idl/ 2>/dev/null || true
+
+      - name: Commit and push program docs to validator repo
+        run: |
+          git config user.name "saadkhan2495"
+          git config user.email "saadkhan2495@gmail.com"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ github.event.inputs.branch }}"
+          else
+            BRANCH="${{ github.event.repository.default_branch }}"
+          fi
+
+          git checkout -B "$BRANCH"
+          git add rakurai_docs/rakurai_programs/
+          git status --short
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(docs): sync program docs from rakurai_programs submodule"
+            git push origin "$BRANCH"
+          else
+            echo "No program doc changes to commit."
+          fi
+
       - name: Clone central docs repo
         run: |
           git clone https://x-access-token:${{ secrets.DOCS_REPO_TOKEN }}@github.com/rakurai-io/rakurai-docs.git
 
-      # 3. Create directory structure and copy files
       - name: Copy docs into structured directories
         run: |
           REPO_NAME=${{ github.event.repository.name }}
+          DEST=rakurai-docs/docs/services/$REPO_NAME
 
-          # Create subdirectories
-          mkdir -p rakurai-docs/docs/services/$REPO_NAME/spark-geyser/
+          rm -rf "$DEST/*"
+          mkdir -p "$DEST/rakurai_docs"
+          mkdir -p "$DEST/spark-geyser"
+          mkdir -p "$DEST/jito-protos/protos"
 
-          # Copy README.md files
-          cp README.md rakurai-docs/docs/services/$REPO_NAME/README.md
-          cp Running-Geyser-with-Rakurai-Client.md rakurai-docs/docs/services/$REPO_NAME/Running-Geyser-with-Rakurai-Client.md
-          cp VERIFY-BINARY-ATTESTATION.md  rakurai-docs/docs/services/$REPO_NAME/VERIFY-BINARY-ATTESTATION.md
-          cp spark-geyser/README.md rakurai-docs/docs/services/$REPO_NAME/spark-geyser/README.md
-          cp spark-geyser/config.json rakurai-docs/docs/services/$REPO_NAME/spark-geyser/config.json
+          # --- Top-level hub ---
+          cp README.md "$DEST/README.md"
 
-      # 4. Commit & push
-      - name: Commit and push
+          # --- rakurai_docs: validators, integrators, synced rakurai_programs ---
+          cp -r rakurai_docs/. "$DEST/rakurai_docs/"
+
+          # --- spark-geyser assets ---
+          cp spark-geyser/README.md "$DEST/spark-geyser/README.md"
+          cp spark-geyser/config.json "$DEST/spark-geyser/config.json"
+
+          # --- post-pack proto assets (for integrator doc links) ---
+          cp jito-protos/protos/packet.proto "$DEST/jito-protos/protos/packet.proto"
+          cp jito-protos/protos/block_engine.proto "$DEST/jito-protos/protos/block_engine.proto"
+
+      - name: Commit and push to rakurai-docs
         run: |
           cd rakurai-docs
           git config user.name "saadkhan2495"
           git config user.email "saadkhan2495@gmail.com"
-          git add docs/services/${{ github.event.repository.name }}/ 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "Update ${{ github.event.repository.name }} doc"
+          git add docs/services/${{ github.event.repository.name }}/
+          git status --short
+          git diff --cached --quiet || git commit -m "Update ${{ github.event.repository.name }} docs"
           git push

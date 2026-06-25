@@ -1,23 +1,20 @@
-use anchor_lang::prelude::Pubkey as AnchorPubkey;
-use solana_gossip::cluster_info::ClusterInfo;
-use solana_runtime_transaction::transaction_meta::TransactionMeta;
 use {
     super::{LikeClusterInfo, transaction_scheduler::transaction_state_container::SharedBytes},
     crate::banking_stage::{
         DecisionState, SchedulerError, SchedulerObj,
-        decision_maker::BufferedPacketsDecision,
-        decision_maker::DecisionMaker,
+        decision_maker::{BufferedPacketsDecision, DecisionMaker},
         scheduler_messages::MaxAge,
         transaction_scheduler::{
             scheduler_controller::translate_decision_into_decision_state,
             transaction_state::TransactionState,
         },
     },
+    agave_reserved_account_keys::ReservedAccountKeys,
     agave_transaction_view::{
         resolved_transaction_view::ResolvedTransactionView,
         transaction_view::SanitizedTransactionView,
     },
-    anchor_lang::AccountDeserialize,
+    anchor_lang::{AccountDeserialize, prelude::Pubkey as AnchorPubkey},
     crossbeam_channel::Sender,
     jito_tip_distribution::{
         sdk::derive_tip_distribution_account_address,
@@ -29,6 +26,16 @@ use {
             derive_config_account_address as derive_activation_config_account_address,
         },
         state::{RakuraiActivationAccount, RakuraiActivationConfigAccount},
+    },
+    rakurai_tip_manager::{
+        TipManagerConfigAccount,
+        sdk::{
+            derive_rakurai_tip_manager_config_account_address,
+            derive_rakurai_tip_payment_account_pdas,
+            instruction::{
+                ChangeTipReceiverAccounts, ChangeTipReceiverArgs, change_tip_receiver_ix,
+            },
+        },
     },
     reward_distribution::{
         sdk::{
@@ -45,16 +52,20 @@ use {
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
+    solana_gossip::cluster_info::ClusterInfo,
     solana_hash::Hash,
     solana_instruction::{AccountMeta, Instruction},
     solana_ledger::blockstore::Blockstore,
     solana_message::Message,
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
-    solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
+    solana_runtime_transaction::{
+        runtime_transaction::RuntimeTransaction, transaction_meta::TransactionMeta,
+        transaction_with_meta::TransactionWithMeta,
+    },
     solana_sdk_ids::system_program,
     solana_signature::Signature,
-    solana_svm_transaction::svm_transaction::SVMTransaction,
+    solana_svm_transaction::{svm_message::SVMStaticMessage, svm_transaction::SVMTransaction},
     solana_transaction::{Transaction, sanitized::MessageHash, versioned::VersionedTransaction},
     solana_transaction_status::RewardType,
     std::{
@@ -63,9 +74,10 @@ use {
             Arc, RwLock,
             atomic::{AtomicBool, Ordering::Relaxed},
         },
-        time::Duration,
+        time::{Duration, Instant},
         u64,
     },
+    thiserror::Error,
 };
 
 #[cfg(feature = "build_validator")]
@@ -75,6 +87,38 @@ use crate::banking_stage::rakurai_enabled;
 unsafe extern "C" {
     #[allow(improper_ctypes)]
     pub fn reset_rakurai();
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RakuraiOpTxn {
+    pub txn: Option<RuntimeTransaction<ResolvedTransactionView<Arc<Vec<u8>>>>>,
+    pub landed: bool,
+}
+
+impl RakuraiOpTxn {
+    pub fn default() -> Self {
+        Self {
+            txn: None,
+            landed: false,
+        }
+    }
+
+    /// Create a new pending transaction
+    pub fn txn(&mut self, txn: RuntimeTransaction<ResolvedTransactionView<Arc<Vec<u8>>>>) {
+        self.txn = Some(txn);
+    }
+
+    /// Reset state
+    pub fn reset(&mut self) {
+        self.txn = None;
+        self.landed = false;
+    }
+
+    /// Mark transaction as landed and release txn memory
+    pub fn landed(&mut self) {
+        self.txn = None;
+        self.landed = true;
+    }
 }
 
 #[allow(dead_code)]
@@ -105,6 +149,7 @@ pub struct TxnsHistory {
 pub struct RewardDistributionConfig {
     pub rakurai_activation_program_id: Pubkey,
     pub reward_distribution_program_id: Pubkey,
+    pub rakurai_tip_manager_program_id: Pubkey,
     pub rewards_merkle_root_authority: Pubkey,
     pub tip_distribution_program_id: Pubkey,
     pub vote_account: Pubkey,
@@ -115,18 +160,12 @@ impl Default for RewardDistributionConfig {
         Self {
             rakurai_activation_program_id: Pubkey::new_unique(),
             reward_distribution_program_id: Pubkey::new_unique(),
+            rakurai_tip_manager_program_id: Pubkey::new_unique(),
             rewards_merkle_root_authority: Pubkey::new_unique(),
             tip_distribution_program_id: Pubkey::new_unique(),
             vote_account: Pubkey::new_unique(),
         }
     }
-}
-
-#[derive(PartialEq, Debug)]
-pub enum RCAState {
-    Initialized,
-    NotInitalized,
-    Pending,
 }
 
 #[derive(PartialEq, Debug)]
@@ -141,7 +180,6 @@ pub struct RewardDistributor {
     cluster_info: Arc<ClusterInfo>,
     blockstore: Arc<Blockstore>,
     bank_forks: Arc<RwLock<BankForks>>,
-    rca_state: RCAState,
     rakurai_commission_on_mev_commission_stats: RakuraiCommissionOnMevStatus,
     distribution_config: RewardDistributionConfig,
     shared_decision: (Arc<RwLock<DecisionState>>, Arc<AtomicBool>),
@@ -175,7 +213,6 @@ impl RewardDistributor {
             cluster_info,
             blockstore,
             bank_forks,
-            rca_state: RCAState::NotInitalized,
             rakurai_commission_on_mev_commission_stats: RakuraiCommissionOnMevStatus::NotDeducted,
             distribution_config,
             shared_decision,
@@ -215,24 +252,7 @@ impl RewardDistributor {
         bank: &Bank,
         rca_pda: AnchorPubkey,
         tda_pda: AnchorPubkey,
-    ) {
-        match self.check_and_create_mev_commission_txn(bank, rca_pda, tda_pda) {
-            Some(runtime_tx) => {
-                // Mark as transaction sent to prevent multiple transactions per turn
-                self.rakurai_commission_on_mev_commission_stats =
-                    RakuraiCommissionOnMevStatus::TransactionSent;
-                self.send_transaction(runtime_tx);
-            }
-            None => {}
-        }
-    }
-
-    fn check_and_create_mev_commission_txn(
-        &mut self,
-        bank: &Bank,
-        rca_pda: AnchorPubkey,
-        tda_pda: AnchorPubkey,
-    ) -> Option<RuntimeTransaction<ResolvedTransactionView<SharedBytes>>> {
+    ) -> Result<Option<Instruction>, RewardDistributorError> {
         let (derive_mev_claim_status_pda_address, _bump) = Pubkey::find_program_address(
             &[
                 ClaimStatus::SEED,
@@ -243,7 +263,8 @@ impl RewardDistributor {
         );
         match bank.get_account(&derive_mev_claim_status_pda_address) {
             None => {
-                return None;
+                // Tip not distributed yet
+                return Ok(None);
             }
             Some(account_shared_data) => {
                 let mut account_data = account_shared_data.data();
@@ -251,11 +272,14 @@ impl RewardDistributor {
                     .ok()
                     .unwrap();
 
-                let account_shared_data =
-                    bank.get_account(&Pubkey::new_from_array(rca_pda.as_array().clone()))?;
+                let account_shared_data = bank
+                    .get_account(&Pubkey::new_from_array(rca_pda.as_array().clone()))
+                    .ok_or(RewardDistributorError::RcaAccountNotFound)?;
                 let mut account_data = account_shared_data.data();
                 let reward_collection_account =
-                    RewardCollectionAccount::try_deserialize(&mut account_data).ok()?;
+                    RewardCollectionAccount::try_deserialize(&mut account_data)
+                        .ok()
+                        .ok_or(RewardDistributorError::RcaDeserializationFailed)?;
 
                 let reward_distribution_program_id = AnchorPubkey::from(
                     self.distribution_config
@@ -290,21 +314,11 @@ impl RewardDistributor {
                     })
                     .collect();
 
-                let instruction = Instruction::new_with_bytes(
+                Ok(Some(Instruction::new_with_bytes(
                     self.distribution_config.reward_distribution_program_id,
                     &instruction.data,
                     acct_metas,
-                );
-                let message = Message::new(&[instruction], Some(&self.cluster_info.id()));
-                let tx = Transaction::new(
-                    &[self.cluster_info.keypair().clone()],
-                    message,
-                    bank.confirmed_last_blockhash(),
-                );
-                let enable_static_instruction_limit = bank
-                    .feature_set
-                    .is_active(&agave_feature_set::static_instruction_limit::ID);
-                self.create_runtime_transaction(tx, bank, enable_static_instruction_limit)
+                )))
             }
         }
     }
@@ -415,22 +429,25 @@ impl RewardDistributor {
         (true, Some(rca_pda), Some(tda_pda))
     }
 
-    fn create_transfer_rca_transaction(
+    fn create_transfer_rca_instruction(
         &mut self,
         total_rewards: u64,
         reward_account: Pubkey,
         bank: &Bank,
-    ) -> Option<RuntimeTransaction<ResolvedTransactionView<SharedBytes>>> {
-        let account_shared_data = bank.get_account(&reward_account)?;
+    ) -> Result<Option<Instruction>, RewardDistributorError> {
+        let account_shared_data = bank
+            .get_account(&reward_account)
+            .ok_or(RewardDistributorError::RcaAccountNotFound)?;
         let mut account_data = account_shared_data.data();
-        let reward_collection_account =
-            RewardCollectionAccount::try_deserialize(&mut account_data).ok()?;
+        let reward_collection_account = RewardCollectionAccount::try_deserialize(&mut account_data)
+            .ok()
+            .ok_or(RewardDistributorError::RcaDeserializationFailed)?;
 
         if reward_collection_account.block_reward_commission_bps == 10_000
             && reward_collection_account.block_builder_commission_bps == 0
         {
             self.accumulated_reward = 0;
-            return None;
+            return Ok(None);
         }
 
         let reward_distribution_program_id = AnchorPubkey::from(
@@ -464,26 +481,14 @@ impl RewardDistributor {
             })
             .collect();
 
-        let instruction = Instruction::new_with_bytes(
+        Ok(Some(Instruction::new_with_bytes(
             self.distribution_config.reward_distribution_program_id,
             &instruction.data,
             acct_metas,
-        );
-
-        let message = Message::new(&[instruction], Some(&self.cluster_info.id()));
-        let tx = Transaction::new(
-            &[self.cluster_info.keypair().clone()],
-            message,
-            bank.confirmed_last_blockhash(),
-        );
-        let enable_static_instruction_limit = bank
-            .feature_set
-            .is_active(&agave_feature_set::static_instruction_limit::ID);
-
-        self.create_runtime_transaction(tx, bank, enable_static_instruction_limit)
+        )))
     }
 
-    pub fn get_reward_collection_pda_status(&mut self, bank: &Bank) -> Pubkey {
+    fn get_reward_collection_pda_status(&mut self, bank: &Bank) -> (bool, Pubkey) {
         let reward_distribution_program_id = AnchorPubkey::from(
             self.distribution_config
                 .reward_distribution_program_id
@@ -499,29 +504,23 @@ impl RewardDistributor {
         );
         let pda = Pubkey::from(pda.as_array().clone());
 
-        match bank.get_account(&pda) {
-            None => {
-                self.rca_state = if self.rca_state != RCAState::Pending {
-                    RCAState::NotInitalized
-                } else {
-                    RCAState::Pending
-                }
-            }
+        let rca_created = match bank.get_account(&pda) {
+            None => false,
             Some(account) => {
                 if account.owner() == &self.distribution_config.reward_distribution_program_id {
-                    self.rca_state = RCAState::Initialized
+                    true
                 } else {
-                    self.rca_state = RCAState::NotInitalized
+                    false
                 }
             }
         };
-        pda
+        (rca_created, pda)
     }
 
-    fn initialize_reward_collection_account_tx(
+    fn initialize_reward_collection_account_instruction(
         &self,
         bank: &Bank,
-    ) -> Option<RuntimeTransaction<ResolvedTransactionView<SharedBytes>>> {
+    ) -> Result<Instruction, RewardDistributorError> {
         let rakurai_activation_program_id = AnchorPubkey::from(
             self.distribution_config
                 .rakurai_activation_program_id
@@ -530,22 +529,28 @@ impl RewardDistributor {
         );
         let activation_config_account_pubkey =
             derive_activation_config_account_address(&rakurai_activation_program_id).0;
-        let config_account_shared_data = bank.get_account(&Pubkey::from(
-            activation_config_account_pubkey.as_array().clone(),
-        ))?;
+        let config_account_shared_data = bank
+            .get_account(&Pubkey::from(
+                activation_config_account_pubkey.as_array().clone(),
+            ))
+            .ok_or(RewardDistributorError::RaaConfigAccountNotFound)?;
         let mut config_account_data = config_account_shared_data.data();
         let rakurai_activation_config =
-            RakuraiActivationConfigAccount::try_deserialize(&mut config_account_data).ok()?;
+            RakuraiActivationConfigAccount::try_deserialize(&mut config_account_data)
+                .ok()
+                .ok_or(RewardDistributorError::RaaConfigDeserializationFailed)?;
 
         let identity = AnchorPubkey::from(self.cluster_info.id().clone().as_array().clone());
         let activation_account_pubkey =
             derive_activation_account_address(&rakurai_activation_program_id, &identity).0;
 
-        let account_shared_data =
-            bank.get_account(&Pubkey::from(activation_account_pubkey.as_array().clone()))?;
+        let account_shared_data = bank
+            .get_account(&Pubkey::from(activation_account_pubkey.as_array().clone()))
+            .ok_or(RewardDistributorError::RaaAccountNotFound)?;
         let mut account_data = account_shared_data.data();
-        let rakurai_activation =
-            RakuraiActivationAccount::try_deserialize(&mut account_data).ok()?;
+        let rakurai_activation = RakuraiActivationAccount::try_deserialize(&mut account_data)
+            .ok()
+            .ok_or(RewardDistributorError::RaaDeserializationFailed)?;
 
         let reward_distribution_program_id = AnchorPubkey::from(
             self.distribution_config
@@ -597,13 +602,19 @@ impl RewardDistributor {
             })
             .collect();
 
-        let instruction = Instruction::new_with_bytes(
+        Ok(Instruction::new_with_bytes(
             self.distribution_config.reward_distribution_program_id,
             &instruction.data,
             acct_metas,
-        );
+        ))
+    }
 
-        let message = Message::new(&[instruction], Some(&self.cluster_info.id()));
+    fn create_runtime_transaction(
+        &self,
+        bank: &Bank,
+        instructions: &[Instruction],
+    ) -> Option<RuntimeTransaction<ResolvedTransactionView<SharedBytes>>> {
+        let message = Message::new(&instructions, Some(&self.cluster_info.id()));
         let tx = Transaction::new(
             &[self.cluster_info.keypair().clone()],
             message,
@@ -613,15 +624,6 @@ impl RewardDistributor {
             .feature_set
             .is_active(&agave_feature_set::static_instruction_limit::ID);
 
-        self.create_runtime_transaction(tx, bank, enable_static_instruction_limit)
-    }
-
-    fn create_runtime_transaction(
-        &self,
-        tx: Transaction,
-        bank: &Bank,
-        enable_static_instruction_limit: bool,
-    ) -> Option<RuntimeTransaction<ResolvedTransactionView<SharedBytes>>> {
         let serialized_transaction = {
             let transaction = VersionedTransaction::from(tx);
             bincode::serialize(&transaction).unwrap()
@@ -640,12 +642,18 @@ impl RewardDistributor {
             )
             .ok()?;
 
-        RuntimeTransaction::<ResolvedTransactionView<SharedBytes>>::try_new(
-            static_runtime_transaction,
-            None,
-            bank.get_reserved_account_keys(),
-        )
-        .ok()
+        let dynamic_runtime_transaction =
+            RuntimeTransaction::<ResolvedTransactionView<SharedBytes>>::try_new(
+                static_runtime_transaction,
+                None,
+                &ReservedAccountKeys::empty_key_set(),
+            );
+
+        if dynamic_runtime_transaction.is_ok() {
+            Some(dynamic_runtime_transaction.unwrap())
+        } else {
+            None
+        }
     }
 
     fn check_txn_status(&mut self) {
@@ -685,35 +693,74 @@ impl RewardDistributor {
         }
     }
 
-    pub fn process_init_and_transfer(&mut self, working_bank: Arc<Bank>, reward_account: Pubkey) {
-        if self.rca_state == RCAState::NotInitalized {
-            if let Some(runtime_tx) = self.initialize_reward_collection_account_tx(&working_bank) {
-                self.send_transaction(runtime_tx);
-                self.rca_state = RCAState::Pending;
-            }
-        }
+    pub fn change_tip_receiver_instruction(
+        &mut self,
+        bank: &Arc<Bank>,
+    ) -> Result<Option<Instruction>, RewardDistributorError> {
+        // Get TipManager config Account
+        let rakurai_tip_manager_program_id = AnchorPubkey::from(
+            self.distribution_config
+                .rakurai_tip_manager_program_id
+                .as_array()
+                .clone(),
+        );
+        let identity = AnchorPubkey::from(self.cluster_info.id().clone().as_array().clone());
+        let tip_manager_config_pda =
+            derive_rakurai_tip_manager_config_account_address(&rakurai_tip_manager_program_id);
+        let account_data = bank
+            .get_account(&Pubkey::new_from_array(
+                *tip_manager_config_pda.0.as_array(),
+            ))
+            .ok_or(RewardDistributorError::TipConfigAccountNotFound)?;
+        let tip_manager_config = TipManagerConfigAccount::try_deserialize(&mut account_data.data())
+            .ok()
+            .ok_or(RewardDistributorError::TipConfigDeserializationFailed)?;
+        let tip_accounts = derive_rakurai_tip_payment_account_pdas(&rakurai_tip_manager_program_id);
 
-        if self.accumulated_reward > 0 && self.rca_state == RCAState::Initialized {
-            if let Some(runtime_tx) = self.create_transfer_rca_transaction(
-                self.accumulated_reward,
-                reward_account,
-                &working_bank,
-            ) {
-                let signature = runtime_tx.signature().clone();
-                self.txns_history.insert(
-                    signature,
-                    TxnsHistory {
-                        rewards: self.accumulated_reward,
-                        message_hash: runtime_tx.message_hash().clone(),
-                        send_slot: working_bank.slot(),
-                        blockhash: runtime_tx.recent_blockhash().clone(),
-                    },
-                );
-                self.accumulated_reward = 0;
+        // Run change_tip_receiver instruction if active validator_tip_receiver_account != validator identity
+        // Todo:
+        // - phase-1: transfer tips directly to validator identity (done)
+        // - phase-2: transfer tip to RCA and option to distribute tip along with block rewards
+        // - phase-3: convert tips to block reward
+        if tip_manager_config.validator_tip_receiver_account != identity {
+            let mut instruction = change_tip_receiver_ix(
+                rakurai_tip_manager_program_id,
+                ChangeTipReceiverArgs,
+                ChangeTipReceiverAccounts {
+                    tip_manager_config: tip_manager_config_pda.0,
+                    old_tip_receiver: tip_manager_config.validator_tip_receiver_account,
+                    new_tip_receiver: identity,
+                    block_builder_commission_account: tip_manager_config
+                        .block_builder_commission_account,
+                    rakurai_tip_account_0: tip_accounts[0].0,
+                    rakurai_tip_account_1: tip_accounts[1].0,
+                    rakurai_tip_account_2: tip_accounts[2].0,
+                    rakurai_tip_account_3: tip_accounts[3].0,
+                    rakurai_tip_account_4: tip_accounts[4].0,
+                    rakurai_tip_account_5: tip_accounts[5].0,
+                    rakurai_tip_account_6: tip_accounts[6].0,
+                    rakurai_tip_account_7: tip_accounts[7].0,
+                    signer: identity,
+                },
+            );
 
-                self.send_transaction(runtime_tx);
-            }
+            let acct_metas: Vec<AccountMeta> = instruction
+                .accounts
+                .iter_mut()
+                .map(|acct| AccountMeta {
+                    pubkey: Pubkey::from(acct.pubkey.as_array().clone()),
+                    is_signer: acct.is_signer,
+                    is_writable: acct.is_writable,
+                })
+                .collect();
+
+            return Ok(Some(Instruction::new_with_bytes(
+                self.distribution_config.rakurai_tip_manager_program_id,
+                &instruction.data,
+                acct_metas,
+            )));
         }
+        Ok(None)
     }
 
     fn send_transaction(
@@ -772,12 +819,12 @@ impl RewardDistributor {
                 true //do not remove from record if !(skipped | rooted)
             }
         });
-        if self.rca_state == RCAState::Pending {
-            self.rca_state = RCAState::NotInitalized
-        }
         buffered_slots.retain(|slot| match self.read_rewards(*slot) {
             Some(reward) => {
-                info!("read-rewards-slot={:?},reward={}", slot, reward);
+                info!(
+                    "reward_distributor read-rewards-slot={:?},reward={}",
+                    slot, reward
+                );
                 slot_rewards.insert(*slot, reward);
                 false
             }
@@ -822,10 +869,19 @@ impl RewardDistributor {
         // this is const of 5ms because make_consume_or_forward_decision updates its decision after every 5 ms
         // so polling make_consume_or_forward_decision at a higher frequency is not needed
         let timeout_ms = Duration::from_millis(5);
-        let mut last_slot = 0;
         let mut last_epoch = 0;
+
+        let mut rakurai_op_txn = RakuraiOpTxn::default();
+        let mut is_tip_receiver_changed;
+        // Retry interval while RCA is not initialized or tip receiver is not yet updated
+        let rakurai_op_txn_retry_interval_ms = Duration::from_millis(25);
+        let mut instant = Instant::now();
+        let mut instructions = Vec::new();
+        let mut last_log_slot = 0;
+
         loop {
             std::thread::sleep(timeout_ms);
+            instructions.clear();
 
             #[cfg(feature = "build_validator")]
             if self.reset_rakurai.load(Relaxed) {
@@ -910,7 +966,7 @@ impl RewardDistributor {
                             let current_epoch = bank_start.working_bank.epoch();
                             if last_epoch != 0 && last_epoch != current_epoch {
                                 info!(
-                                    "Epoch changed from {} to {}, slot {}",
+                                    "reward_distributor epoch changed from {} to {}, slot {}",
                                     last_epoch, current_epoch, slot
                                 );
                                 // Reset MEV commission status on epoch change
@@ -931,83 +987,249 @@ impl RewardDistributor {
                 }
             }
 
-            if slot > last_slot {
-                last_slot = slot;
-                match decision {
-                    BufferedPacketsDecision::ForwardAndHold => {
-                        self.read_rewards_and_check_txn_history(
-                            &mut slot_rewards,
-                            &mut buffered_slots,
-                        );
+            match decision {
+                BufferedPacketsDecision::ForwardAndHold => {
+                    self.read_rewards_and_check_txn_history(&mut slot_rewards, &mut buffered_slots);
 
-                        let bank_forks_r = self.bank_forks.read();
-                        if bank_forks_r.is_ok() {
-                            let current_slot = bank_forks_r.unwrap().working_bank().slot();
-                            self.txns_history.retain(|_, history| {
-                                if current_slot > history.send_slot + 150 {
-                                    self.accumulated_reward += history.rewards;
-                                    false
-                                } else {
-                                    true
-                                }
-                            });
-                        }
-                        turn_started = false;
+                    let bank_forks_r = self.bank_forks.read();
+                    if bank_forks_r.is_ok() {
+                        let current_slot = bank_forks_r.unwrap().working_bank().slot();
+                        self.txns_history.retain(|_, history| {
+                            if current_slot > history.send_slot + 150 {
+                                self.accumulated_reward += history.rewards;
+                                false
+                            } else {
+                                true
+                            }
+                        });
                     }
+                    turn_started = false;
+                }
 
-                    BufferedPacketsDecision::Consume(bank_start) => {
+                BufferedPacketsDecision::Consume(bank_start) => {
+                    if rakurai_op_txn.landed == false && rakurai_op_txn.txn.is_none() {
+                        is_tip_receiver_changed = false;
+                        instant = Instant::now();
+
                         let working_bank = bank_start.working_bank;
-                        let reward_account = self.get_reward_collection_pda_status(&working_bank);
-                        if self.rca_state == RCAState::Pending {
-                            continue;
+                        let (rca_created, reward_collection_account) =
+                            self.get_reward_collection_pda_status(&working_bank);
+
+                        // Initalized RCA
+                        if !rca_created {
+                            match self
+                                .initialize_reward_collection_account_instruction(&working_bank)
+                            {
+                                Ok(ix) => {
+                                    debug!(
+                                        "reward_distributor initialize_reward_collection_account_instruction"
+                                    );
+                                    instructions.push(ix);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "reward_distributor error in initialize_reward_collection_account_instruction: {e}"
+                                    );
+                                }
+                            }
                         }
-                        self.process_init_and_transfer(working_bank, reward_account);
-                    }
 
-                    BufferedPacketsDecision::Forward => {
-                        self.read_rewards_and_check_txn_history(
-                            &mut slot_rewards,
-                            &mut buffered_slots,
-                        );
-                        turn_started = false;
-                    }
+                        // Change Tip Receiver
+                        match self.change_tip_receiver_instruction(&working_bank) {
+                            Ok(maybe_ix) => match maybe_ix {
+                                Some(ix) => {
+                                    debug!("reward_distributor change_tip_receiver_instruction");
+                                    is_tip_receiver_changed = true;
+                                    instructions.push(ix);
+                                }
+                                None => {
+                                    debug!(
+                                        "reward_distributor change_tip_receiver_instruction not required"
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                error!(
+                                    "reward_distributor error in change_tip_receiver_instruction: {e}"
+                                );
+                            }
+                        }
 
-                    BufferedPacketsDecision::Hold => {
-                        let bank_forks_r = self.bank_forks.read();
-                        if bank_forks_r.is_ok() {
-                            let working_bank = bank_forks_r.unwrap().working_bank();
-                            let reward_account =
-                                self.get_reward_collection_pda_status(&working_bank);
-                            info!(
-                                "block_reward_distributor,decision=hold,reward_collection_account={},epoch={},rca_status={:?},pending_txns_count={:?}",
-                                reward_account,
-                                working_bank.epoch(),
-                                self.rca_state,
-                                self.txns_history.len()
-                            );
-                            match self.rakurai_commission_on_mev_commission_stats {
-                                RakuraiCommissionOnMevStatus::NotDeducted => {
-                                    let (should_deduct, rca_pda, tda_pda) =
-                                        self.should_deduct_mev_commission(&working_bank, 50);
-                                    if should_deduct && rca_pda.is_some() && tda_pda.is_some() {
-                                        info!("deducting mev commission");
-                                        self.transfer_mev_commission(
-                                            &working_bank,
-                                            rca_pda.unwrap(),
-                                            tda_pda.unwrap(),
+                        // Transfer block rewards to RCA
+                        if self.accumulated_reward > 0 {
+                            match self.create_transfer_rca_instruction(
+                                self.accumulated_reward,
+                                reward_collection_account,
+                                &working_bank,
+                            ) {
+                                Ok(maybe_ix) => match maybe_ix {
+                                    Some(ix) => {
+                                        debug!(
+                                            "reward_distributor create_transfer_rca_instruction"
+                                        );
+                                        instructions.push(ix);
+                                    }
+                                    None => {
+                                        debug!(
+                                            "reward_distributor create_transfer_rca_instruction not required"
                                         );
                                     }
+                                },
+                                Err(e) => {
+                                    error!(
+                                        "reward_distributor error in create_transfer_rca_instruction: {e}"
+                                    );
                                 }
-                                _ => {}
                             }
-                            if self.rca_state == RCAState::Pending {
+                        }
+
+                        // Check & Create MEV commission transfer instruction if applicable
+                        match self.rakurai_commission_on_mev_commission_stats {
+                            RakuraiCommissionOnMevStatus::NotDeducted => {
+                                let (should_deduct, rca_pda, tda_pda) =
+                                    self.should_deduct_mev_commission(&working_bank, 50);
+                                if should_deduct && rca_pda.is_some() && tda_pda.is_some() {
+                                    info!("reward_distributor deducting mev commission");
+                                    match self.transfer_mev_commission(
+                                        &working_bank,
+                                        rca_pda.unwrap(),
+                                        tda_pda.unwrap(),
+                                    ) {
+                                        Ok(maybe_ix) => match maybe_ix {
+                                            Some(ix) => {
+                                                debug!(
+                                                    "reward_distributor transfer_mev_commission"
+                                                );
+                                                instructions.push(ix);
+                                            }
+                                            None => {
+                                                debug!(
+                                                    "reward_distributor transfer_mev_commission not required"
+                                                );
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("error in transfer_mev_commission: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        // Create and Send Txn
+                        if instructions.len() > 0 {
+                            if let Some(runtime_tx) =
+                                self.create_runtime_transaction(&working_bank, &instructions)
+                            {
+                                let signature = runtime_tx.signature().clone();
+                                info!(
+                                    "reward_distributor txn_sent instructions={},sig={signature}",
+                                    instructions.len()
+                                );
+                                self.txns_history.insert(
+                                    signature,
+                                    TxnsHistory {
+                                        rewards: self.accumulated_reward,
+                                        message_hash: runtime_tx.message_hash().clone(),
+                                        send_slot: working_bank.slot(),
+                                        blockhash: runtime_tx.recent_blockhash().clone(),
+                                    },
+                                );
+
+                                rakurai_op_txn.txn(runtime_tx.clone());
+                                self.accumulated_reward = 0;
+                                self.send_transaction(runtime_tx);
+                            }
+                        }
+
+                        // Log once per leader slot
+                        if working_bank.slot() != last_log_slot {
+                            last_log_slot = working_bank.slot();
+                            info!(
+                                "reward_distributor decision=consume, rca={}, epoch={}, slot={}, rca_status={:?}, rakurai_commission_on_mev_commission_stats={:?}, change_tip_receiver_instruction={}, pending_txns_count={}, pending_txns={:?}",
+                                reward_collection_account,
+                                working_bank.epoch(),
+                                working_bank.slot(),
+                                rca_created,
+                                self.rakurai_commission_on_mev_commission_stats,
+                                is_tip_receiver_changed,
+                                self.txns_history.len(),
+                                self.txns_history
+                                    .iter()
+                                    .map(|(sig, tx)| (sig, tx.send_slot, tx.rewards))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                    } else {
+                        // Continue is txn landed is true (for this turn)
+                        if rakurai_op_txn.landed {
+                            continue;
+                        }
+                        if instant.elapsed() <= rakurai_op_txn_retry_interval_ms {
+                            continue;
+                        }
+                        let landed = {
+                            let Some(runtime_tx) = rakurai_op_txn.txn.as_ref() else {
                                 continue;
+                            };
+                            if bank_start
+                                .working_bank
+                                .get_signature_status_with_blockhash(
+                                    runtime_tx.as_sanitized_transaction().signature(),
+                                    runtime_tx.as_sanitized_transaction().recent_blockhash(),
+                                )
+                                .is_none()
+                            {
+                                self.send_transaction(runtime_tx.clone());
+                                instant = Instant::now();
+                                false
+                            } else {
+                                true
                             }
-                            self.process_init_and_transfer(working_bank, reward_account);
+                        };
+                        // mark txn as landed (landed=true, txn:None)
+                        if landed {
+                            rakurai_op_txn.landed();
                         }
                     }
                 }
+
+                BufferedPacketsDecision::Forward => {
+                    self.read_rewards_and_check_txn_history(&mut slot_rewards, &mut buffered_slots);
+                    turn_started = false;
+                    rakurai_op_txn.reset();
+                }
+
+                BufferedPacketsDecision::Hold => {}
             }
         }
     }
+}
+
+#[derive(Debug, Error)]
+pub enum RewardDistributorError {
+    #[error("RCA account not found")]
+    RcaAccountNotFound,
+
+    #[error("RCA deserialization failed")]
+    RcaDeserializationFailed,
+
+    #[error("RAA config account not found")]
+    RaaConfigAccountNotFound,
+
+    #[error("RAA config deserialization failed")]
+    RaaConfigDeserializationFailed,
+
+    #[error("RAA account not found")]
+    RaaAccountNotFound,
+
+    #[error("RAA deserialization failed")]
+    RaaDeserializationFailed,
+
+    #[error("Tip config account not found")]
+    TipConfigAccountNotFound,
+
+    #[error("Tip config deserialization failed")]
+    TipConfigDeserializationFailed,
 }

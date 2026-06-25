@@ -198,6 +198,7 @@ strum_macros = { workspace = true }
 sys-info = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+rakurai_tip_manager = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

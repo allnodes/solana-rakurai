@@ -589,6 +589,8 @@ tarpc = "0.29.0"
 tempfile = "3.27.0"
 test-case = "3.3.1"
 thiserror = "2.0.18"
+thread-priority = "3.0.0"
+rakurai_tip_manager = { path = "rakurai_programs/programs/rakurai_tip_manager", features = ["no-entrypoint"] }
 tiny-bip39 = "2.0.0"
 tokio = "1.52.3"
 tokio-serde = "0.8"

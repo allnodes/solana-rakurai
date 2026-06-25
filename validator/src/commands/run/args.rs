@@ -1327,6 +1327,13 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("The public key of rakurai reward distribution program"),
     )
     .arg(
+        Arg::with_name("rakurai_tip_manager_program_id")
+            .long("rakurai-tip-manager-program-id")
+            .value_name("RAKURAI_TIP_MANAGER_PROGRAM_ID")
+            .takes_value(true)
+            .help("The public key of rakurai tip manager program"),
+    )
+    .arg(
         Arg::with_name("banking_packet_delay_ms")
             .long("banking-packet-delay-ms")
             .value_name("BANKING_PACKET_DELAY_MS")

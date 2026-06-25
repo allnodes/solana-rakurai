@@ -859,6 +859,12 @@ pub fn execute(
             }
             Pubkey::new_unique()
         }),
+        rakurai_tip_manager_program_id: pubkey_of(&matches, "rakurai_tip_manager_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rakurai-tip-manager-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
         tip_distribution_program_id:tip_manager_config.tip_distribution_program_id,
     };
 
