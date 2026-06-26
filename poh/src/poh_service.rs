@@ -197,18 +197,13 @@ impl PohService {
 
     pub fn target_tick_ns_adjusted(
         ticks_per_slot: u64,
-        target_tick_duration_ns: u64,
+        target_tick_ns: u64,
         target_slot_adjustment_ns: u64,
     ) -> u64 {
-        // Account for some extra time outside of PoH generation to account
-        // for processing time outside PoH.
-        let adjustment_per_tick = if ticks_per_slot > 0 {
-            target_slot_adjustment_ns / ticks_per_slot
-        } else {
-            0
-        };
-
-        target_tick_duration_ns.saturating_sub(adjustment_per_tick)
+        let adjustment_per_tick = target_slot_adjustment_ns
+            .checked_div(ticks_per_slot)
+            .unwrap_or(0);
+        target_tick_ns.saturating_sub(adjustment_per_tick)
     }
 
     fn low_power_tick_producer(
@@ -559,9 +554,9 @@ impl PohService {
         let mut timing = PohTiming::new();
         let mut next_record = None;
         let mut should_exit = poh_exit.load(Ordering::Relaxed);
-        let target_ns_per_tick = Self::target_tick_ns_adjusted(
+        let mut target_ns_per_tick = Self::target_tick_ns_adjusted(
             ticks_per_slot,
-            poh_config.target_tick_duration.as_nanos() as u64,
+            Self::target_tick_ns_reconciled(&poh_recorder, poh_config),
             target_slot_adjustment_ns,
         );
 
@@ -617,6 +612,11 @@ impl PohService {
             if let Some(service_message) = service_message {
                 if !should_exit {
                     Self::handle_service_message(&poh_recorder, service_message, record_receiver);
+                    target_ns_per_tick = Self::target_tick_ns_adjusted(
+                        ticks_per_slot,
+                        Self::target_tick_ns_reconciled(&poh_recorder, poh_config),
+                        target_slot_adjustment_ns,
+                    );
                 }
             }
 
