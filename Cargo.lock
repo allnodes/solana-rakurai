@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "agave-ledger-tool"
-version = "4.1.0-rc.1"
+version = "4.1.1"
 dependencies = [
  "agave-feature-set",
  "agave-logger",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-client"
-version = "4.1.0-rc.1"
+version = "4.1.1"
 dependencies = [
  "allnodes-service-protos",
  "arc-swap",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-service-protos"
-version = "4.1.0-rc.1"
+version = "4.1.1"
 dependencies = [
  "borsh 1.6.1",
  "prost 0.14.3",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "allnodes-solana"
-version = "4.1.0-rc.1"
+version = "4.1.1"
 dependencies = [
  "allnodes-client",
  "allnodes-service-protos",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "block-rewards-distributor"
-version = "4.1.0-rc.1"
+version = "4.1.1"
 dependencies = [
  "agave-snapshots",
  "anchor-lang",
@@ -6565,6 +6565,9 @@ name = "rakurai_tip_manager"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "rakurai_activation",
+ "reward_distribution",
+ "solana-program 2.3.0",
  "solana-security-txt",
 ]
 
@@ -6893,10 +6896,11 @@ dependencies = [
 
 [[package]]
 name = "reward_distribution"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anchor-lang",
  "rakurai-vote-state",
+ "rakurai_activation",
  "solana-program 2.3.0",
  "solana-security-txt",
 ]
