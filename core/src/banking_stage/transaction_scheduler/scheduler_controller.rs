@@ -268,7 +268,7 @@ where
         client_mode: Arc<Mutex<ClientMode>>,
     ) -> Self {
         priority_floor.clear();
-        let container_capacity = TOTAL_BUFFERED_PACKETS;
+        let container_capacity = *TOTAL_BUFFERED_PACKETS;
         let saturation_state = SaturationState::new(priority_floor, container_capacity);
         Self {
             exit,

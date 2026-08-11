@@ -187,13 +187,13 @@ dependencies = [
  "agave-logger",
  "bzip2",
  "clap 2.33.3",
- "console 0.16.3",
+ "console",
  "crossbeam-channel",
  "ctrlc",
  "dirs-next",
  "indicatif",
  "nix",
- "reqwest 0.12.28",
+ "reqwest",
  "scopeguard",
  "semver 1.0.28",
  "serde",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "agave-ledger-tool"
-version = "4.2.0-beta.2"
+version = "4.2.0-rc.1"
 dependencies = [
  "agave-feature-set",
  "agave-logger",
@@ -470,6 +470,9 @@ dependencies = [
  "agave-snapshots",
  "agave-votor",
  "agave-xdp",
+ "allnodes-client",
+ "allnodes-service-protos",
+ "allnodes-solana",
  "arc-swap",
  "assert_cmd",
  "assert_matches",
@@ -477,7 +480,7 @@ dependencies = [
  "caps",
  "chrono",
  "clap 2.33.3",
- "console 0.16.3",
+ "console",
  "crossbeam-channel",
  "fd-lock",
  "indicatif",
@@ -721,6 +724,67 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67fc08ce920c31afb70f013dcce1bfc3a3195de6a228474e45e1f145b36f8d04"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "allnodes-client"
+version = "4.2.0-rc.1"
+dependencies = [
+ "allnodes-service-protos",
+ "arc-swap",
+ "base64 0.22.1",
+ "bincode",
+ "futures-util",
+ "hex",
+ "log",
+ "mid",
+ "parking_lot 0.12.3",
+ "prost 0.14.4",
+ "regex",
+ "serde",
+ "serde_json",
+ "solana-keypair",
+ "solana-signer 3.0.1",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "allnodes-qos"
+version = "4.2.0-rc.1"
+dependencies = [
+ "allnodes-client",
+ "bincode",
+ "crossbeam-channel",
+ "log",
+ "solana-transaction 4.1.4",
+]
+
+[[package]]
+name = "allnodes-service-protos"
+version = "4.2.0-rc.1"
+dependencies = [
+ "borsh 1.7.0",
+ "prost 0.14.4",
+ "solana-hash 4.4.0",
+ "solana-pubkey 4.2.0",
+ "thiserror 2.0.18",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "allnodes-solana"
+version = "4.2.0-rc.1"
+dependencies = [
+ "allnodes-client",
+ "allnodes-service-protos",
+ "core_affinity",
+ "log",
+ "serde",
+ "solana-entry",
+ "solana-gossip",
 ]
 
 [[package]]
@@ -1855,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "block-rewards-distributor"
-version = "4.2.0-beta.2"
+version = "4.2.0-rc.1"
 dependencies = [
  "agave-snapshots",
  "anchor-lang",
@@ -2474,19 +2538,6 @@ dependencies = [
 
 [[package]]
 name = "console"
-version = "0.15.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
-dependencies = [
- "encode_unicode",
- "libc",
- "once_cell",
- "unicode-width 0.2.0",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "console"
 version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
@@ -2596,6 +2647,17 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -3072,7 +3134,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25f104b501bf2364e78d0d3974cbc774f738f5865306ed128e1e0d7499c0ad96"
 dependencies = [
- "console 0.16.3",
+ "console",
  "shell-words",
  "tempfile",
  "zeroize",
@@ -4108,15 +4170,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12cb882ccb290b8646e554b157ab0b71e64e8d5bef775cd66b6531e52d302669"
 
 [[package]]
-name = "hkdf"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
-dependencies = [
- "hmac 0.12.1",
-]
-
-[[package]]
 name = "hmac"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4145,6 +4198,12 @@ dependencies = [
  "generic-array",
  "hmac 0.8.1",
 ]
+
+[[package]]
+name = "hmac-sha256"
+version = "1.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
 
 [[package]]
 name = "home"
@@ -4318,22 +4377,6 @@ dependencies = [
  "hyper-util",
  "pin-project-lite",
  "tokio",
- "tower-service",
-]
-
-[[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
  "tower-service",
 ]
 
@@ -4623,7 +4666,7 @@ version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
 dependencies = [
- "console 0.16.3",
+ "console",
  "portable-atomic",
  "unicode-width 0.2.0",
  "unit-prefix",
@@ -5395,6 +5438,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mid"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "625672364b1e9c02508daefc259ccdf07a7ecc55145769ef7938d3a815423261"
+dependencies = [
+ "hex",
+ "hmac-sha256",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6038,7 +6091,6 @@ dependencies = [
  "fixedbitset 0.5.7",
  "hashbrown 0.15.1",
  "indexmap 2.14.0",
- "serde",
 ]
 
 [[package]]
@@ -6709,81 +6761,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
-name = "rakurai-scheduler"
-version = "0.1.0"
-dependencies = [
- "agave-banking-stage-ingress-types",
- "agave-feature-set",
- "agave-logger",
- "agave-transaction-view",
- "ahash 0.8.12",
- "anchor-lang",
- "arc-swap",
- "arrayvec",
- "bincode",
- "borsh 1.7.0",
- "crossbeam-channel",
- "env_logger",
- "histogram",
- "hkdf",
- "itertools 0.14.0",
- "jito-protos",
- "log",
- "min-max-heap",
- "once_cell",
- "petgraph 0.8.3",
- "prio-graph",
- "prost-types 0.14.4",
- "quanta",
- "rakurai_activation",
- "sem_safe",
- "serde",
- "serde_derive",
- "sha2 0.10.9",
- "slab",
- "smallvec",
- "solana-account 4.3.1",
- "solana-accounts-db",
- "solana-address 2.6.1",
- "solana-address-lookup-table-interface 3.1.0",
- "solana-blake3-hasher 3.1.0",
- "solana-clock 3.1.1",
- "solana-compute-budget",
- "solana-core",
- "solana-cost-model",
- "solana-fee",
- "solana-fee-calculator 3.2.2",
- "solana-gossip",
- "solana-hash 4.4.0",
- "solana-keypair",
- "solana-ledger",
- "solana-measure",
- "solana-message 4.2.3",
- "solana-metrics",
- "solana-nonce 3.2.0",
- "solana-nonce-account",
- "solana-perf",
- "solana-poh",
- "solana-pubkey 4.2.0",
- "solana-runtime",
- "solana-runtime-transaction",
- "solana-sanitize 3.0.1",
- "solana-sdk",
- "solana-sdk-ids 3.1.0",
- "solana-signature 3.4.1",
- "solana-signer 3.0.1",
- "solana-streamer",
- "solana-svm",
- "solana-svm-transaction",
- "solana-time-utils",
- "solana-transaction 4.1.4",
- "solana-version",
- "tokio",
- "tokio-stream",
- "tonic",
-]
-
-[[package]]
 name = "rakurai-vote-state"
 version = "0.1.0"
 dependencies = [
@@ -6806,7 +6783,7 @@ dependencies = [
 
 [[package]]
 name = "rakurai_cli"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anchor-lang",
  "bincode",
@@ -6819,11 +6796,14 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "shellexpand",
+ "solana-account 4.3.1",
+ "solana-account-decoder-client-types",
  "solana-commitment-config",
  "solana-instruction 3.4.0",
  "solana-keypair",
  "solana-message 4.2.3",
  "solana-pubkey 4.2.0",
+ "solana-rent 4.3.0",
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-signature 3.4.1",
@@ -7167,43 +7147,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "reqwest"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-channel",
- "futures-core",
- "futures-util",
- "http 1.4.2",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-tls",
- "hyper-util",
- "js-sys",
- "log",
- "native-tls",
- "percent-encoding 2.3.2",
- "pin-project-lite",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sync_wrapper",
- "tokio",
- "tokio-native-tls",
- "tower",
- "tower-http",
- "tower-service",
- "url 2.5.8",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "reqwest-middleware"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7212,7 +7155,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "http 1.4.2",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "thiserror 1.0.69",
  "tower-service",
@@ -7569,18 +7512,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49db231d56a190491cb4aeda9527f1ad45345af50b0851622a7adb8c03b01c32"
 dependencies = [
  "core-foundation-sys",
- "libc",
-]
-
-[[package]]
-name = "sem_safe"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be9665e92f9b596cf2b20a8c0f55126cfee3514307740a859f1b25bc929e4947"
-dependencies = [
- "base64 0.22.1",
- "errno",
- "getrandom 0.2.15",
  "libc",
 ]
 
@@ -8832,14 +8763,14 @@ dependencies = [
  "bip39",
  "bs58 0.5.1",
  "clap 2.33.3",
- "console 0.16.3",
+ "console",
  "const_format",
  "hex",
  "humantime",
  "log",
  "num-traits",
  "pretty-hex",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "solana-account 4.3.1",
@@ -8931,7 +8862,7 @@ dependencies = [
  "bitvec",
  "chrono",
  "clap 2.33.3",
- "console 0.16.3",
+ "console",
  "humantime",
  "indicatif",
  "pretty-hex",
@@ -9228,6 +9159,10 @@ dependencies = [
  "agave-votor-messages",
  "agave-xdp",
  "ahash 0.8.12",
+ "allnodes-client",
+ "allnodes-qos",
+ "allnodes-service-protos",
+ "allnodes-solana",
  "anchor-lang",
  "anyhow",
  "arc-swap",
@@ -9918,13 +9853,11 @@ dependencies = [
 [[package]]
 name = "solana-file-download"
 version = "3.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b72d3025bed3ca0a12d4cf62b4a5a766e817657bc1c1ea1af6e628dc92b176c"
 dependencies = [
- "console 0.15.11",
+ "console",
  "indicatif",
  "log",
- "reqwest 0.13.2",
+ "reqwest",
 ]
 
 [[package]]
@@ -10255,6 +10188,9 @@ name = "solana-hash-512"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ce934b02bab639341f2fd62c3e7e3c39dcceb47f0196b7630ed1f82ecb704bd"
+dependencies = [
+ "borsh 1.7.0",
+]
 
 [[package]]
 name = "solana-inflation"
@@ -10501,6 +10437,7 @@ dependencies = [
  "agave-reserved-account-keys",
  "agave-snapshots",
  "agave-votor-messages",
+ "allnodes-client",
  "anyhow",
  "assert_matches",
  "bitflags 2.13.0",
@@ -10867,7 +10804,7 @@ dependencies = [
  "gethostname",
  "log",
  "rand 0.9.4",
- "reqwest 0.12.28",
+ "reqwest",
  "serial_test",
  "solana-cluster-type",
  "solana-metrics",
@@ -10988,7 +10925,7 @@ name = "solana-notifier"
 version = "4.2.0-rc.1"
 dependencies = [
  "log",
- "reqwest 0.12.28",
+ "reqwest",
  "serde_json",
  "solana-hash 4.4.0",
 ]
@@ -11710,7 +11647,7 @@ name = "solana-remote-wallet"
 version = "4.2.0-rc.1"
 dependencies = [
  "assert_matches",
- "console 0.16.3",
+ "console",
  "dialoguer",
  "hex",
  "hidapi",
@@ -11906,7 +11843,7 @@ dependencies = [
  "jsonrpc-core",
  "jsonrpc-http-server",
  "log",
- "reqwest 0.12.28",
+ "reqwest",
  "reqwest-middleware",
  "semver 1.0.28",
  "serde",
@@ -11947,7 +11884,7 @@ version = "4.2.0-rc.1"
 dependencies = [
  "anyhow",
  "jsonrpc-core",
- "reqwest 0.12.28",
+ "reqwest",
  "reqwest-middleware",
  "serde",
  "serde_json",
@@ -12031,7 +11968,7 @@ dependencies = [
  "crossbeam-channel",
  "futures-util",
  "log",
- "reqwest 0.12.28",
+ "reqwest",
  "serde_json",
  "solana-account-decoder",
  "solana-client",
@@ -12542,11 +12479,9 @@ dependencies = [
 [[package]]
 name = "solana-sha256-hasher"
 version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db7dc3011ea4c0334aaaa7e7128cb390ecf546b28d412e9bf2064680f57f588f"
 dependencies = [
- "sha2 0.10.9",
- "solana-define-syscall 4.0.1",
+ "sha2 0.11.0",
+ "solana-define-syscall 5.1.0",
  "solana-hash 4.4.0",
 ]
 
@@ -13407,7 +13342,7 @@ dependencies = [
  "bincode",
  "chrono",
  "clap 2.33.3",
- "console 0.16.3",
+ "console",
  "csv",
  "ctrlc",
  "indexmap 2.14.0",
@@ -13684,6 +13619,7 @@ dependencies = [
  "agave-votor",
  "agave-votor-messages",
  "agave-xdp",
+ "allnodes-client",
  "arc-swap",
  "assert_matches",
  "bencher",
@@ -15175,16 +15111,6 @@ dependencies = [
  "proc-macro2 1.0.106",
  "quote 1.0.45",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tokio-native-tls"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7d995660bd2b7f8c1568414c1126076c13fbb725c40112dc0120b78eb9b717b"
-dependencies = [
- "native-tls",
- "tokio",
 ]
 
 [[package]]
