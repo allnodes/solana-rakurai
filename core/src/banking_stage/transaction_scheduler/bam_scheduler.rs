@@ -356,6 +356,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             }
         })
     }
@@ -365,6 +366,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         work.ids.clear();
         work.transactions.clear();
         work.max_ages.clear();
+        work.gui_schedule_info.clear();
         self.reusable_consume_work.push(work);
     }
 
@@ -728,6 +730,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             num_scheduled,
             num_unschedulable_conflicts: 0,
             num_unschedulable_threads: 0,
+            num_conflict_with_bundles: 0,
         })
     }
 
@@ -812,6 +815,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
         todo!()
+    }
+
+    fn in_flight_txns(&mut self) -> bool {
+        false
     }
 }
 
