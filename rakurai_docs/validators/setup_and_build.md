@@ -27,8 +27,8 @@ Additionally:
 Clone the latest Rakurai-Solana release with submodules:
 
 ```bash
-git clone https://github.com/rakurai-io/rakurai-validator.git --recurse-submodules
-cd ./rakurai-validator
+git clone https://github.com/allnodes/solana-rakurai.git --recurse-submodules
+cd ./solana-rakurai
 git checkout <RELEASE_TAG>
 ```
 
