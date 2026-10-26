@@ -92,6 +92,7 @@ fn bench_record_transactions(c: &mut Criterion) {
         poh_service_receiver,
         Arc::new(MigrationStatus::default()),
         record_receiver_sender,
+        solana_poh::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
     );
     poh_controller
         .set_bank_sync(BankWithScheduler::new_without_scheduler(bank.clone()))

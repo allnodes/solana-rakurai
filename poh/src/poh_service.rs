@@ -843,6 +843,7 @@ mod tests {
             poh_service_message_receiver,
             Arc::new(MigrationStatus::default()),
             record_receiver_sender,
+            TARGET_SLOT_ADJUSTMENT_NS,
         );
 
         // Let poh service process the messages.
@@ -880,6 +881,8 @@ mod tests {
             &leader_schedule_cache,
             &genesis_config.poh_config,
             Arc::new(AtomicBool::default()),
+            TARGET_SLOT_ADJUSTMENT_NS,
+            None,
         );
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
         let (mut poh_controller, poh_service_message_receiver) = PohController::new();
