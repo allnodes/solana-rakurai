@@ -49,6 +49,10 @@ frozen-abi = [
 ]
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-qos = { workspace = true }
+
 quanta = "0.12.5"
 anchor-lang = { workspace = true }
 agave-reserved-account-keys = { workspace = true }

@@ -1,3 +1,45 @@
+<p align="center">
+    <br /><br />
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="allnodes/images/rakurai-dark-mode.png">
+      <img alt="Rakurai-Solana Node Allnodes Edition" src="allnodes/images/rakurai-light-mode.png" style="width: 16em">
+    </picture>
+</p>
+
+# Rakurai-Solana Node with modifications from Allnodes
+
+## Modifications made by Allnodes
+
+This repository features the following enhancements to the Jito-Solana codebase:
+
+### 1. Fast snapshot distribution
+
+✅ Only on [Allnodes Bare-Metal Servers](https://www.allnodes.com/hosting/solana)
+
+Our infrastructure includes modifications that improve default snapshot downloading, which combined with
+ultra-high-speed channels deliver ultra-fast snapshot downloads. This dramatically reduces the initial sync time for
+new validators and enables faster deployment and recovery scenarios. The use of snapshot-finder or any other 3rd party
+download tools is no longer needed.
+
+### 2. Hardware-optimized SHA256 patch
+
+Our validator implementation includes a third-party performance patch developed by **kagren**. It optimizes SHA256
+hashing operations using SHA-NI instructions available on modern AMD processors (Zen3, Zen4, and Zen5
+architectures). This enhancement significantly improves hashing performance for block verification and other
+cryptographic operations.
+
+### 3. Improved XDP and added support for bonded interfaces
+
+When XDP is enabled, your node receives transactions and blocks over AF_XDP, bypassing the operating system. Agave uses
+XDP for sending only, so everything arriving at our modification of Agave is handled faster than on a stock client.
+
+Bonded interfaces are supported: name the bond master and every slave is accelerated, and if one link goes down,
+traffic keeps flowing over the others.
+
+Now you can configure the validator to share a machine and a network card with other applications that use XDP: each
+gets its own slice of the card's receive queues, so they do not interfere with each other. In this case, the validator
+does not take over the interface, so another XDP program can keep using it.
+
 # Rakurai-Solana Docs
 
 Welcome to the Rakurai documentation. These guides are intended for validator operators, searchers, and traders using the Rakurai ecosystem.
