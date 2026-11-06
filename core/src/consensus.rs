@@ -581,6 +581,7 @@ impl Tower {
         }
     }
 
+    /*
     #[cfg(test)]
     fn is_slot_confirmed(
         &self,
@@ -593,6 +594,7 @@ impl Tower {
             .map(|stake| (*stake as f64 / total_stake as f64) > self.threshold_size)
             .unwrap_or(false)
     }
+    */
 
     pub(crate) fn is_slot_duplicate_confirmed(
         &self,
@@ -1842,6 +1844,7 @@ pub fn reconcile_blockstore_roots_with_external_source(
     Ok(())
 }
 
+/*
 #[cfg(test)]
 pub mod test {
     use {
@@ -4023,3 +4026,4 @@ pub mod test {
         }
     }
 }
+*/

@@ -22,6 +22,11 @@ agave-unstable-api = []
 tip-router = ["dep:jito-tip-router-snapshot-service"]
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+allnodes-solana = { workspace = true }
+
 agave-cpu-utils = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-logger = { workspace = true }
